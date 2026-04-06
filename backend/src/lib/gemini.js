@@ -14,7 +14,7 @@ const model = genAI.getGenerativeModel({ model: modelName });
  * @param {string} title 
  * @param {string} description 
  * @param {Array} categories Array of available categories from DB
- * @returns {Promise<{category_id: string, ai_confidence: number}>}
+ * @returns {Promise<{category_id: string, ai_confidence: number, priority: string}>}
  */
 async function classifyIssue(title, description, categories) {
   if (!apiKey) return null;
@@ -24,11 +24,12 @@ async function classifyIssue(title, description, categories) {
       categories.map(c => ({ id: c.id, name: c.name, default_authority: c.default_authority }))
     );
 
-    const prompt = `You are an AI router for a smart city issue reporting platform. Evaluate the following report and classify it into one of the provided categories.
-Your response MUST be a valid JSON object containing exactly two fields:
+    const prompt = `You are an AI router for a smart city issue reporting platform. Evaluate the following report and classify it.
+Your response MUST be a valid JSON object containing exactly three fields:
 {
   "category_id": "uuid of chosen category",
-  "ai_confidence": a float between 0.0 and 1.0 representing classification confidence
+  "ai_confidence": a float between 0.0 and 1.0 representing classification confidence,
+  "priority": one of "low", "medium", or "high" based on importance and urgency
 }
 
 Available Categories: ${categoriesJSON}
@@ -57,7 +58,8 @@ Return ONLY the raw JSON format string, nothing else.`;
     const aiRes = JSON.parse(cleanedText.trim());
     return {
       category_id: aiRes.category_id,
-      ai_confidence: aiRes.ai_confidence
+      ai_confidence: aiRes.ai_confidence,
+      priority: aiRes.priority || 'medium'
     };
   } catch (err) {
     console.error('Gemini Classification Error:', err);

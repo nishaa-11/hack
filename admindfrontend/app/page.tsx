@@ -19,6 +19,7 @@ export default function SinglePageDashboard() {
   const [recentReports, setRecentReports] = useState<any[]>([]);
   const [chartData, setChartData] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [selectedPriority, setSelectedPriority] = useState<string>('all');
 
   useEffect(() => {
     async function fetchDashboardData() {
@@ -48,7 +49,7 @@ export default function SinglePageDashboard() {
         });
 
         // 2. Fetch reports for table and chart (using professional join)
-        const { data: reports, error: reportsErr } = await supabase
+        let query = supabase
           .from('reports')
           .select(`
             id, title, status, address, category_id, 
@@ -56,6 +57,12 @@ export default function SinglePageDashboard() {
             issue_categories ( name )
           `)
           .order('created_at', { ascending: false });
+
+        if (selectedPriority !== 'all') {
+          query = query.eq('priority', selectedPriority.toLowerCase());
+        }
+
+        const { data: reports, error: reportsErr } = await query;
 
         if (reportsErr) {
           console.error('SUPABASE REPORTS ERROR:', reportsErr);
@@ -87,7 +94,7 @@ export default function SinglePageDashboard() {
     }
 
     fetchDashboardData();
-  }, []);
+  }, [selectedPriority]);
 
   const getStatusColor = (status: string) => {
     switch (status) {
@@ -231,13 +238,22 @@ export default function SinglePageDashboard() {
                 <h2 className="text-xl font-black text-slate-900 tracking-tight">Recent Complaints Queue</h2>
                 <p className="text-sm text-slate-500 font-medium mt-1">Live feed of active issues from Bengaluru</p>
               </div>
-              <div className="flex gap-2">
-                <button className="flex items-center gap-2 bg-emerald-50 text-emerald-700 px-4 py-2 rounded-xl font-bold text-sm hover:bg-emerald-100 transition-colors">
-                  <Calendar className="w-4 h-4" /> Filter
-                </button>
-                <button className="flex items-center gap-2 bg-emerald-700 text-white px-4 py-2 rounded-xl font-bold text-sm hover:bg-emerald-800 transition-colors shadow-sm">
-                  <Download className="w-4 h-4" /> Export
-                </button>
+              <div className="flex gap-2 items-center">
+                <div className="relative">
+                  <select 
+                    value={selectedPriority} 
+                    onChange={(e) => setSelectedPriority(e.target.value)}
+                    className="appearance-none bg-emerald-50 text-emerald-700 px-4 py-2 pr-10 rounded-xl font-bold text-sm hover:bg-emerald-100 transition-colors cursor-pointer outline-none border-none shadow-sm"
+                  >
+                    <option value="all">Any Priority</option>
+                    <option value="high">High Only</option>
+                    <option value="medium">Medium Only</option>
+                    <option value="low">Low Only</option>
+                  </select>
+                  <div className="pointer-events-none absolute inset-y-0 right-0 flex items-center px-3 text-emerald-600">
+                    <svg className="fill-current h-4 w-4" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 20 20"><path d="M9.293 12.95l.707.707L15.657 8l-1.414-1.414L10 10.828 5.757 6.586 4.343 8z"/></svg>
+                  </div>
+                </div>
               </div>
             </div>
 

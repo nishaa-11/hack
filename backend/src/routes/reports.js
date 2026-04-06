@@ -139,6 +139,7 @@ router.post('/', authenticate, [
         category_id = geminiResult.category_id;
         ai_classified = true;
         ai_confidence = geminiResult.ai_confidence;
+        priority = geminiResult.priority; // Set the AI-determined priority
         
         // Also auto-route if the category has a default authority mapping
         const assignedCat = allCats.find(c => c.id === category_id);

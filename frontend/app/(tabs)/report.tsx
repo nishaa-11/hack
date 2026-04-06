@@ -39,6 +39,7 @@ export default function ReportScreen() {
   // Dropdown states
   const [categoryModal, setCategoryModal] = useState(false);
   const [wardModal, setWardModal] = useState(false);
+  const [detectingLocation, setDetectingLocation] = useState(false);
 
   const loadMetadata = useCallback(async () => {
     try {
@@ -87,6 +88,47 @@ export default function ReportScreen() {
     });
     if (!result.canceled && result.assets && result.assets.length > 0) {
       setImageUri(result.assets[0].uri);
+    }
+  };
+
+  const detectLocation = async () => {
+    try {
+      setDetectingLocation(true);
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Denied', 'Location permission is needed to auto-detect your ward.');
+        return;
+      }
+
+      const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
+      const geocode = await Location.reverseGeocodeAsync({ 
+        latitude: loc.coords.latitude, 
+        longitude: loc.coords.longitude 
+      });
+
+      if (geocode.length > 0) {
+        const p = geocode[0];
+        const searchTerms = [p.district, p.subregion, p.street, p.name].filter(Boolean) as string[];
+        
+        // Attempt to find a matching ward
+        const match = wards.find(w => 
+          searchTerms.some(term => 
+            w.name.toLowerCase().includes(term.toLowerCase()) || 
+            term.toLowerCase().includes(w.name.toLowerCase())
+          )
+        );
+
+        if (match) {
+          setSelectedWard(match);
+          Alert.alert('Location Detected', `Detected: ${p.district || p.subregion || 'Your area'}\nAuto-selected: ${match.name}`);
+        } else {
+          Alert.alert('Location Detected', `You are near ${p.district || p.subregion || 'this location'}, but we couldn't find a precisely matching ward. Please select it manually.`);
+        }
+      }
+    } catch (err) {
+      Alert.alert('Detection failed', 'Could not determine your location. Please select your ward manually.');
+    } finally {
+      setDetectingLocation(false);
     }
   };
 
@@ -272,7 +314,19 @@ export default function ReportScreen() {
           </TouchableOpacity>
 
           {/* Ward Dropdown */}
-          <Text style={styles.label}>Ward</Text>
+          <View style={styles.labelRow}>
+            <Text style={styles.label}>Ward</Text>
+            <TouchableOpacity 
+              style={styles.detectBtn} 
+              onPress={detectLocation}
+              disabled={detectingLocation || !wards.length}
+            >
+              <MapPin size={12} color="#1a7a4a" />
+              <Text style={styles.detectBtnText}>
+                {detectingLocation ? 'Detecting...' : 'Detect'}
+              </Text>
+            </TouchableOpacity>
+          </View>
           <TouchableOpacity
             style={styles.selectorBtn}
             disabled={!wards.length}
@@ -473,7 +527,10 @@ const styles = StyleSheet.create({
   actionPillText: { color: '#1a7a4a', fontSize: 13, fontWeight: '600' },
 
   card: { backgroundColor: '#fff', borderRadius: 14, padding: 14, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 6, elevation: 2, },
-  label: { fontSize: 13, fontWeight: '700', color: '#374151', marginBottom: 6, marginTop: 8 },
+  labelRow: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, marginTop: 8 },
+  label: { fontSize: 13, fontWeight: '700', color: '#374151', marginBottom: 0, marginTop: 0 },
+  detectBtn: { flexDirection: 'row', alignItems: 'center', gap: 4, backgroundColor: '#ebf4f1', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12 },
+  detectBtnText: { fontSize: 11, fontWeight: '700', color: '#1a7a4a' },
   input: { borderWidth: 1, borderColor: '#e5e7eb', borderRadius: 10, color: '#111827', fontSize: 15 },
   textareaContainer: { minHeight: 110, padding: 12 },
   textInputArea: {
