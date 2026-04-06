@@ -11,7 +11,9 @@ import {
   Text,
   TouchableOpacity,
   View,
+  Image,
 } from 'react-native';
+import * as ImagePicker from 'expo-image-picker';
 import {
   CheckCircle,
   Droplets,
@@ -68,7 +70,7 @@ function statusStyle(status: string) {
 }
 
 export default function ProfileScreen() {
-  const { profile: authProfile } = useAuth();
+  const { profile: authProfile, localAvatarUri, setLocalAvatarUri } = useAuth();
   const [profile, setProfile] = useState<Profile | null>(null);
   const [impact, setImpact] = useState<NeighborhoodImpact | null>(null);
   const [badges, setBadges] = useState<UserBadge[]>([]);
@@ -200,6 +202,17 @@ export default function ProfileScreen() {
     return data.name.split(' ').map((n) => n[0]).join('').toUpperCase().slice(0, 2);
   }, [data]);
 
+  const pickProfileImage = async () => {
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      allowsEditing: true,
+      quality: 0.8,
+    });
+    if (!result.canceled && result.assets && result.assets.length > 0) {
+      setLocalAvatarUri(result.assets[0].uri);
+    }
+  };
+
   // Build locked placeholder badges to fill grid to 6
   const LOCKED_BADGES = [
     { name: 'Clean City Champion', icon: <Building2 size={26} color="#C0C0C0" /> },
@@ -250,15 +263,19 @@ export default function ProfileScreen() {
         {/* ── HERO ── */}
         <View style={s.hero}>
           {/* Avatar Ring */}
-          <View style={s.avatarRing}>
+          <TouchableOpacity style={s.avatarRing} onPress={pickProfileImage} activeOpacity={0.8}>
             <View style={s.avatarInner}>
-              <Text style={s.avatarText}>{initials}</Text>
+              {localAvatarUri ? (
+                <Image source={{ uri: localAvatarUri }} style={{ width: '100%', height: '100%', borderRadius: 42 }} />
+              ) : (
+                <Text style={s.avatarText}>{initials}</Text>
+              )}
             </View>
             {/* Level badge */}
             <View style={s.levelBadge}>
               <Text style={s.levelBadgeText}>LVL {data?.level ?? 1}</Text>
             </View>
-          </View>
+          </TouchableOpacity>
 
           <Text style={s.name}>{data?.name ?? 'Citizen'}</Text>
           <View style={s.subtitleRow}>

@@ -12,6 +12,8 @@ interface AuthContextType {
   signUp: (email: string, password: string, name: string) => Promise<void>;
   signOut: () => Promise<void>;
   refreshProfile: () => Promise<void>;
+  localAvatarUri: string | null;
+  setLocalAvatarUri: (uri: string | null) => void;
 }
 
 const AuthContext = createContext<AuthContextType | null>(null);
@@ -21,6 +23,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser]       = useState<User | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null);
   const [loading, setLoading] = useState(true);
+  const [localAvatarUri, setLocalAvatarUri] = useState<string | null>(null);
 
   const fetchProfile = async () => {
     try {
@@ -72,7 +75,7 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
   const refreshProfile = fetchProfile;
 
   return (
-    <AuthContext.Provider value={{ session, user, profile, loading, signIn, signUp, signOut, refreshProfile }}>
+    <AuthContext.Provider value={{ session, user, profile, loading, signIn, signUp, signOut, refreshProfile, localAvatarUri, setLocalAvatarUri }}>
       {children}
     </AuthContext.Provider>
   );

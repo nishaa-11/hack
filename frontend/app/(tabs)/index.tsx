@@ -12,7 +12,8 @@ import {
   FlatList,
   ActivityIndicator,
   Dimensions,
-  Platform
+  Platform,
+  Image
 } from 'react-native';
 import {
   Leaf,
@@ -47,7 +48,7 @@ const MOCK_NOTIFICATIONS = [
 ];
 
 export default function HomeScreen() {
-  const { profile } = useAuth();
+  const { profile, localAvatarUri } = useAuth();
   const router = useRouter();
   const mapRef = useRef<MapView>(null);
 
@@ -128,7 +129,11 @@ export default function HomeScreen() {
             <View style={styles.badge} />
           </TouchableOpacity>
           <TouchableOpacity style={styles.avatar} onPress={() => router.push('/(tabs)/profile')}>
-            <Text style={styles.avatarText}>{initials}</Text>
+            {localAvatarUri ? (
+              <Image source={{ uri: localAvatarUri }} style={{ width: 34, height: 34, borderRadius: 17 }} />
+            ) : (
+              <Text style={styles.avatarText}>{initials}</Text>
+            )}
           </TouchableOpacity>
         </View>
       </View>
