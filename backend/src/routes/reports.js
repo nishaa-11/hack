@@ -2,6 +2,7 @@ const express = require('express');
 const { body, param, query, validationResult } = require('express-validator');
 const supabase = require('../lib/supabase');
 const { authenticate } = require('../middleware/auth');
+const { classifyIssue } = require('../lib/gemini');
 
 const router = express.Router();
 
@@ -91,9 +92,28 @@ router.post('/', authenticate, [
   body('ai_confidence').optional().isFloat({ min: 0, max: 1 }),
   body('authority_routed_to').optional().isString().trim(),
 ], validate, async (req, res) => {
-  const { title, description, category_id, subcategory_id,
+  let { title, description, category_id, subcategory_id,
           ward_id, lat, lng, address, priority,
           ai_classified, ai_confidence, authority_routed_to } = req.body;
+
+  // -- AI Auto-Classification using Gemini --
+  if (title || description) {
+    const { data: allCats } = await supabase.from('issue_categories').select('id, name, default_authority');
+    if (allCats && allCats.length > 0) {
+      const geminiResult = await classifyIssue(title, description, allCats);
+      if (geminiResult && geminiResult.category_id) {
+        category_id = geminiResult.category_id;
+        ai_classified = true;
+        ai_confidence = geminiResult.ai_confidence;
+        
+        // Also auto-route if the category has a default authority mapping
+        const assignedCat = allCats.find(c => c.id === category_id);
+        if (assignedCat && assignedCat.default_authority) {
+          authority_routed_to = assignedCat.default_authority;
+        }
+      }
+    }
+  }
 
   // Award base XP from the category (default fallback 10 XP)
   let xp_awarded = 10;
