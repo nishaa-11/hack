@@ -71,7 +71,7 @@ function statusStyle(status: string) {
 }
 
 export default function ProfileScreen() {
-  const { profile: authProfile, localAvatarUri, setLocalAvatarUri } = useAuth();
+  const { profile: authProfile, localAvatarUri, setLocalAvatarUri, signOut } = useAuth();
   const [profile, setProfile] = useState<Profile | null>(null);
   const [impact, setImpact] = useState<NeighborhoodImpact | null>(null);
   const [badges, setBadges] = useState<UserBadge[]>([]);

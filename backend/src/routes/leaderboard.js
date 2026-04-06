@@ -21,69 +21,31 @@ router.get('/', authenticate, [
 ], validate, async (req, res) => {
   const { scope = 'city', time_period = 'all_time', limit = 20 } = req.query;
 
-  // Find the matching leaderboard row
-  const { data: lb, error: lbErr } = await supabase
-    .from('leaderboards')
-    .select('id')
-    .eq('scope', scope)
-    .eq('time_period', time_period)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .single();
-
-  if (lbErr || !lb) {
-    // Fallback: derive from profiles XP (all_time city)
-    const { data: profiles, error } = await supabase
-      .from('profiles')
-      .select('id, name, xp_total, level, title, avatar_url')
-      .order('xp_total', { ascending: false })
-      .limit(Number(limit));
-
-    if (error || !profiles) {
-      console.warn('[DB WARN] Leaderboard fallback failed or empty:', error?.message);
-      return res.json({ leaderboard: [], scope, time_period });
-    }
-
-    const ranked = profiles.map((p, i) => ({
-      rank: i + 1,
-      user_id: p.id,
-      name: p.name,
-      title: p.title,
-      avatar_url: p.avatar_url,
-      xp: p.xp_total,
-      rank_change: 0,
-      is_me: p.id === req.user.id,
-    }));
-
-    return res.json({ leaderboard: ranked, scope, time_period });
-  }
-
-  // Use stored leaderboard entries
-  const { data: entries, error } = await supabase
-    .from('leaderboard_entries')
-    .select(`
-      rank, xp, rank_change, title, updated_at,
-      profiles ( id, name, avatar_url, level )
-    `)
-    .eq('leaderboard_id', lb.id)
-    .order('rank', { ascending: true })
+  // Always fetch live from profiles table to ensure realtime XP updates for demo
+  const { data: profiles, error } = await supabase
+    .from('profiles')
+    .select('id, name, xp_total, level, title, avatar_url')
+    .order('xp_total', { ascending: false })
     .limit(Number(limit));
 
-  if (error) return res.status(500).json({ error: error.message });
+  if (error || !profiles) {
+    console.warn('[DB WARN] Leaderboard live fetch failed:', error?.message);
+    return res.json({ leaderboard: [], scope, time_period });
+  }
 
-  const result = entries.map(e => ({
-    rank: e.rank,
-    user_id: e.profiles?.id,
-    name: e.profiles?.name,
-    avatar_url: e.profiles?.avatar_url,
-    level: e.profiles?.level,
-    title: e.title,
-    xp: e.xp,
-    rank_change: e.rank_change,
-    is_me: e.profiles?.id === req.user.id,
+  const ranked = profiles.map((p, i) => ({
+    rank: i + 1,
+    user_id: p.id,
+    name: p.name,
+    title: p.title,
+    avatar_url: p.avatar_url,
+    level: p.level,
+    xp: p.xp_total,
+    rank_change: 0,
+    is_me: p.id === req.user.id,
   }));
 
-  res.json({ leaderboard: result, scope, time_period });
+  return res.json({ leaderboard: ranked, scope, time_period });
 });
 
 module.exports = router;

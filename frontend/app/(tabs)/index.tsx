@@ -53,7 +53,7 @@ function categoryColor(cat?: NearbyReport['issue_categories']): string {
 }
 
 export default function HomeScreen() {
-  const { profile, localAvatarUri } = useAuth();
+  const { profile, localAvatarUri, signOut } = useAuth();
   const router = useRouter();
   const mapRef = useRef<MapView>(null);
 
