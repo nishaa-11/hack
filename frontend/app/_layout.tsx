@@ -7,13 +7,14 @@ import { useEffect } from 'react';
 
 import { useColorScheme } from '@/hooks/use-color-scheme';
 import { AuthProvider, useAuth } from '@/context/AuthContext';
+import { View, Text, ActivityIndicator, TouchableOpacity, StyleSheet } from 'react-native';
 
 export const unstable_settings = {
   anchor: '(tabs)',
 };
 
 function RootNavigator() {
-  const { session, loading } = useAuth();
+  const { session, loading, signOut } = useAuth();
   const colorScheme = useColorScheme();
 
   useEffect(() => {
@@ -24,6 +25,18 @@ function RootNavigator() {
       router.replace('/(tabs)');
     }
   }, [session, loading]);
+
+  if (loading) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color="#1a7a4a" />
+        <Text style={styles.loadingText}>Initializing CivicPulse...</Text>
+        <TouchableOpacity style={styles.forceLogout} onPress={signOut}>
+          <Text style={styles.forceLogoutText}>Stuck? Log Out</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
 
   return (
     <ThemeProvider value={colorScheme === 'dark' ? DarkTheme : DefaultTheme}>
@@ -44,3 +57,26 @@ export default function RootLayout() {
     </AuthProvider>
   );
 }
+const styles = StyleSheet.create({
+  loadingContainer: {
+    flex: 1,
+    backgroundColor: '#fff',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 15,
+  },
+  loadingText: {
+    fontSize: 16,
+    color: '#666',
+    fontWeight: '500',
+  },
+  forceLogout: {
+    marginTop: 40,
+    padding: 10,
+  },
+  forceLogoutText: {
+    color: '#1a7a4a',
+    fontSize: 14,
+    textDecorationLine: 'underline',
+  },
+});

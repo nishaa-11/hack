@@ -17,9 +17,13 @@ import {
 } from 'react-native';
 import { ChevronDown, X, Camera, MapPin, Image as ImageIcon } from 'lucide-react-native';
 import * as ImagePicker from 'expo-image-picker';
+import * as Location from 'expo-location';
 import { CategoriesAPI, LocationsAPI, ReportsAPI, type Category, type Ward } from '@/lib/api';
 
+import { useAuth } from '@/context/AuthContext';
+
 export default function ReportScreen() {
+  const { refreshProfile } = useAuth();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [categories, setCategories] = useState<Category[]>([]);
@@ -94,15 +98,55 @@ export default function ReportScreen() {
 
     try {
       setSubmitting(true);
+
+      // Fetch location & address safely (prevent infinite hangs)
+      let lat, lng, address;
+      const { status } = await Location.requestForegroundPermissionsAsync();
+      
+      if (status === 'granted') {
+        try {
+          const loc: any = await Promise.race([
+            Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+            Location.getLastKnownPositionAsync(),
+            new Promise((_, reject) => setTimeout(() => reject(new Error('GPS timeout')), 6000))
+          ]);
+          
+          if (loc && loc.coords) {
+            lat = loc.coords.latitude;
+            lng = loc.coords.longitude;
+            try {
+              const geocode = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lng });
+              if (geocode.length > 0) {
+                const p = geocode[0];
+                address = [p.name, p.street, p.city, p.region].filter(Boolean).join(', ');
+              }
+            } catch (e) {
+              console.warn('Reverse geocode failed:', e);
+            }
+          }
+        } catch (e) {
+          console.warn('[GPS Fetch]', e);
+        }
+      }
+
+      if (!lat) {
+        Alert.alert('Location Warning', 'We could not get your GPS location. Please ensure location services are enabled on your phone.');
+      }
+
       const result = await ReportsAPI.create({
         title: title.trim() || undefined,
         description: description.trim() || undefined,
         category_id: selectedCategory?.id,
         ward_id: selectedWard?.id,
-        // Optional: you can extend this to upload the image URI to your backend storage using supabase storage
+        lat,
+        lng,
+        address,
       });
 
-      Alert.alert('Report submitted', `+${result.xp_awarded} XP awarded`);
+      // Update XP visually right away!
+      await refreshProfile();
+
+      Alert.alert('Report submitted', `+${result.xp_awarded} XP awarded\n${address ? 'Location attached.' : 'No location attached.'}`);
       setTitle('');
       setDescription('');
       setImageUri(null);

@@ -19,20 +19,26 @@ import {
   Leaf,
   ChevronDown,
   Bell,
-  Zap,
   Crosshair,
-  Bus,
-  Droplets,
-  Users,
-  Trash2,
   Search,
   X,
-  MapPin
+  MapPin,
+  LogOut,
 } from 'lucide-react-native';
 import { useAuth } from '@/context/AuthContext';
 import { useRouter } from 'expo-router';
 import MapView, { Marker, UrlTile, Callout } from 'react-native-maps';
 import * as Location from 'expo-location';
+import {
+  ChallengesAPI,
+  NotificationsAPI,
+  NearbyReportsAPI,
+  ProfilesAPI,
+  type Challenge,
+  type Notification,
+  type NearbyReport,
+  type NeighborhoodImpact,
+} from '@/lib/api';
 
 const INDIAN_CITIES = [
   "Mumbai", "Delhi", "Bengaluru", "Hyderabad", "Ahmedabad",
@@ -41,11 +47,10 @@ const INDIAN_CITIES = [
   "Bhopal", "Visakhapatnam", "Pimpri-Chinchwad", "Patna", "Vadodara"
 ].sort();
 
-const MOCK_NOTIFICATIONS = [
-  { id: '1', title: 'Issue Resolved', body: 'The garbage dump in Koramangala has been cleared!', time: '10m ago', unread: true },
-  { id: '2', title: 'New Challenge', body: 'Join the "Clean HSR Layout" weekend drive now.', time: '2h ago', unread: true },
-  { id: '3', title: 'XP Awarded', body: 'You earned +50 XP for reporting a water leak.', time: '5h ago', unread: false },
-];
+// Map issue category colors to a UI color (fallback to green)
+function categoryColor(cat?: NearbyReport['issue_categories']): string {
+  return cat?.color ?? '#1a7a4a';
+}
 
 export default function HomeScreen() {
   const { profile, localAvatarUri } = useAuth();
@@ -60,31 +65,69 @@ export default function HomeScreen() {
   const [location, setLocation] = useState<Location.LocationObject | null>(null);
   const [mapLoading, setMapLoading] = useState(true);
 
-  // Generate mock nearby issues relative to user's location
-  const nearbyIssues = useMemo(() => {
-    if (!location) return [];
-    const { latitude, longitude } = location.coords;
-    return [
-      { id: 'm1', lat: latitude + 0.002, lng: longitude + 0.003, color: '#E8593C', type: 'Waste' },
-      { id: 'm2', lat: latitude - 0.001, lng: longitude + 0.004, color: '#378ADD', type: 'Water' },
-      { id: 'm3', lat: latitude + 0.004, lng: longitude - 0.002, color: '#7F77DD', type: 'Community' },
-      { id: 'm4', lat: latitude - 0.003, lng: longitude - 0.001, color: '#EF9F27', type: 'Road' },
-      { id: 'm5', lat: latitude + 0.005, lng: longitude + 0.001, color: '#1a7a4a', type: 'Green' },
-    ];
-  }, [location]);
+  // Real data states
+  const [nearbyReports, setNearbyReports] = useState<NearbyReport[]>([]);
+  const [notifications, setNotifications] = useState<Notification[]>([]);
+  const [topChallenges, setTopChallenges] = useState<Challenge[]>([]);
+  const [impact, setImpact] = useState<NeighborhoodImpact | null>(null);
+  const [dataLoading, setDataLoading] = useState(true);
 
+  // ── Single coordinated load: wait up to 4s for GPS, then fetch everything once ──
   useEffect(() => {
-    (async () => {
-      let { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') {
-        setMapLoading(false);
-        return;
+    let cancelled = false;
+
+    const run = async () => {
+      // Request location permission
+      const { status } = await Location.requestForegroundPermissionsAsync();
+
+      let loc: Location.LocationObject | null = null;
+      if (status === 'granted') {
+        try {
+          // Race: real GPS vs 4-second fallback to Bengaluru center
+          loc = await Promise.race([
+            Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
+            new Promise<null>(resolve => setTimeout(() => resolve(null), 4000)),
+          ]) as Location.LocationObject | null;
+        } catch {
+          loc = null;
+        }
       }
 
-      let loc = await Location.getCurrentPositionAsync({});
-      setLocation(loc);
-      setMapLoading(false);
-    })();
+      if (!cancelled) {
+        setLocation(loc);
+        setMapLoading(false);
+      }
+
+      // Now fetch all dashboard data with best-available coordinates
+      const lat = loc?.coords.latitude ?? 12.9716;
+      const lng = loc?.coords.longitude ?? 77.5946;
+
+      if (cancelled) return;
+      setDataLoading(true);
+      try {
+        const [nearbyRes, notifRes, challengeRes, impactRes] = await Promise.allSettled([
+          NearbyReportsAPI.get(lat, lng, 5),
+          NotificationsAPI.list(),
+          ChallengesAPI.list(),
+          ProfilesAPI.impact(),
+        ]);
+
+        if (cancelled) return;
+        if (nearbyRes.status === 'fulfilled') setNearbyReports(nearbyRes.value.reports ?? []);
+        if (notifRes.status === 'fulfilled') setNotifications(notifRes.value.notifications ?? []);
+        if (challengeRes.status === 'fulfilled') setTopChallenges((challengeRes.value.challenges ?? []).slice(0, 3));
+        if (impactRes.status === 'fulfilled') setImpact(impactRes.value.impact ?? null);
+      } catch (err) {
+        console.warn('[HomeScreen] Dashboard data error:', err);
+      } finally {
+        if (!cancelled) setDataLoading(false);
+      }
+    };
+
+    run();
+    return () => { cancelled = true; };
+    // Run only once on mount
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const recenter = () => {
@@ -99,13 +142,15 @@ export default function HomeScreen() {
   };
 
   const initials = useMemo(() => {
-    if (!profile?.name) return 'NB';
+    if (!profile?.name) return '?';
     return profile.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
   }, [profile]);
 
   const filteredCities = INDIAN_CITIES.filter(city =>
     city.toLowerCase().includes(searchQuery.toLowerCase())
   );
+
+  const unreadCount = notifications.filter(n => n.unread).length;
 
   return (
     <SafeAreaView style={styles.safeArea}>
@@ -124,9 +169,12 @@ export default function HomeScreen() {
         </TouchableOpacity>
 
         <View style={styles.rightHeader}>
+          <TouchableOpacity style={styles.logoutBtn} onPress={signOut}>
+            <LogOut size={20} color="#E8593C" />
+          </TouchableOpacity>
           <TouchableOpacity style={styles.bellIcon} onPress={() => setNotifModalVisible(true)}>
             <Bell size={24} color="#333" />
-            <View style={styles.badge} />
+            {unreadCount > 0 && <View style={styles.badge} />}
           </TouchableOpacity>
           <TouchableOpacity style={styles.avatar} onPress={() => router.push('/(tabs)/profile')}>
             {localAvatarUri ? (
@@ -140,31 +188,33 @@ export default function HomeScreen() {
 
       <ScrollView style={styles.container} contentContainerStyle={styles.contentContainer} showsVerticalScrollIndicator={false}>
 
-        {/* COMMUNITY IMPACT CARD (MATCHING REFERENCE UI) */}
+        {/* COMMUNITY IMPACT CARD */}
         <View style={styles.impactCard}>
           <View style={styles.impactHeader}>
             <View style={styles.impactTextContainer}>
               <Text style={styles.impactSubtitle}>COMMUNITY IMPACT</Text>
-              <Text style={styles.impactTitle}>Neighborhood Score: 74/100</Text>
+              <Text style={styles.impactTitle}>
+                Neighborhood Score: {impact?.impact_score ?? 0}/100
+              </Text>
             </View>
             <View style={styles.scoreCircle}>
-              <View style={[styles.scoreProgress, { transform: [{ rotate: '45deg' }] }]} />
-              <Text style={styles.scorePercent}>74%</Text>
+              <View style={[styles.scoreProgress, { transform: [{ rotate: `${(impact?.impact_score ?? 0) * 3.6}deg` }] }]} />
+              <Text style={styles.scorePercent}>{impact?.impact_score ?? 0}%</Text>
             </View>
           </View>
 
           <View style={styles.impactStats}>
             <View style={styles.statBox}>
-              <Text style={styles.statNumber}>3</Text>
+              <Text style={styles.statNumber}>{dataLoading ? '—' : String(impact?.total_reports ?? 0)}</Text>
               <Text style={styles.statLabel}>REPORTS FILED</Text>
             </View>
             <View style={styles.statBox}>
-              <Text style={styles.statNumber}>2</Text>
+              <Text style={styles.statNumber}>{dataLoading ? '—' : String(impact?.resolved_reports ?? 0)}</Text>
               <Text style={styles.statLabel}>RESOLVED</Text>
             </View>
             <View style={styles.statBox}>
-              <Text style={styles.statNumber}>5</Text>
-              <Text style={styles.statLabel}>ECO ACTIONS</Text>
+              <Text style={styles.statNumber}>{dataLoading ? '—' : String(impact?.streak_days ?? profile?.streak_days ?? 0)}</Text>
+              <Text style={styles.statLabel}>DAY STREAK</Text>
             </View>
           </View>
         </View>
@@ -186,23 +236,30 @@ export default function HomeScreen() {
                 }}
                 userInterfaceStyle="light"
                 showsUserLocation={true}
-                followsUserLocation={true}
+                followsUserLocation={false}
                 showsMyLocationButton={false}
               >
+                {/* OpenStreetMap tiles */}
                 <UrlTile
                   urlTemplate="https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png"
                   shouldReplaceMapContent={true}
+                  maximumZ={19}
+                  flipY={false}
                 />
-                {nearbyIssues.map(issue => (
+                {/* Real report markers */}
+                {nearbyReports.map(report => (
                   <Marker
-                    key={issue.id}
-                    coordinate={{ latitude: issue.lat, longitude: issue.lng }}
-                    title={issue.type}
+                    key={report.id}
+                    coordinate={{ latitude: report.lat, longitude: report.lng }}
+                    title={report.title ?? report.issue_categories?.name ?? 'Issue'}
                   >
-                    <View style={[styles.mapDot, { backgroundColor: issue.color }]} />
+                    <View style={[styles.mapDot, { backgroundColor: categoryColor(report.issue_categories) }]} />
                     <Callout tooltip>
                       <View style={styles.calloutBubble}>
-                        <Text style={styles.calloutText}>{issue.type}</Text>
+                        <Text style={styles.calloutText} numberOfLines={2}>
+                          {report.title ?? report.issue_categories?.name ?? 'Issue'}
+                        </Text>
+                        <Text style={styles.calloutStatus}>{report.status.replace('_', ' ')}</Text>
                       </View>
                     </Callout>
                   </Marker>
@@ -214,11 +271,13 @@ export default function HomeScreen() {
             </>
           )}
           <View style={styles.mapOverlayPill}>
-            <Text style={styles.mapOverlayText}>12 active issues near you</Text>
+            <Text style={styles.mapOverlayText}>
+              {dataLoading ? 'Loading...' : `${nearbyReports.length} active issue${nearbyReports.length !== 1 ? 's' : ''} near you`}
+            </Text>
           </View>
         </View>
 
-        {/* SECTION HEADER CHALENGES */}
+        {/* SECTION HEADER CHALLENGES */}
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Today's Challenges</Text>
           <TouchableOpacity onPress={() => router.push('/challenges')}>
@@ -226,36 +285,53 @@ export default function HomeScreen() {
           </TouchableOpacity>
         </View>
 
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16 }}>
-          <ChallengeCard
-            icon={<Bus size={18} color="#7F77DD" />}
-            title="Public Transport"
-            xp="+30"
-            color="#7F77DD"
-            onPress={() => router.push('/challenges')}
-          />
-          <ChallengeCard
-            icon={<Droplets size={18} color="#378ADD" />}
-            title="Save Water"
-            xp="+20"
-            color="#378ADD"
-            onPress={() => router.push('/challenges')}
-          />
-          <ChallengeCard
-            icon={<Users size={18} color="#1a7a4a" />}
-            title="Neighborhood Clean"
-            xp="+50"
-            color="#1a7a4a"
-            onPress={() => router.push('/challenges')}
-          />
-        </ScrollView>
+        {dataLoading ? (
+          <ActivityIndicator color="#1a7a4a" style={{ marginVertical: 20 }} />
+        ) : topChallenges.length > 0 ? (
+          <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={{ paddingHorizontal: 16 }}>
+            {topChallenges.map(ch => (
+              <ChallengeCard
+                key={ch.id}
+                title={ch.title}
+                xp={`+${ch.xp_reward}`}
+                type={ch.type}
+                onPress={() => router.push('/challenges')}
+              />
+            ))}
+          </ScrollView>
+        ) : (
+          <Text style={styles.emptyText}>No challenges available right now.</Text>
+        )}
 
         {/* RECENT ACTIVITY FEED */}
-        <Text style={[styles.sectionTitle, { marginLeft: 16, marginTop: 24, marginBottom: 12 }]}>Recent activity</Text>
+        <Text style={[styles.sectionTitle, { marginLeft: 16, marginTop: 24, marginBottom: 12 }]}>Recent Activity</Text>
         <View style={styles.activityList}>
-          <ActivityRow id="1" icon={<Trash2 size={20} color="#E8593C" />} title="Garbage dump — Koramangala" time="2 hrs ago" status="Resolved" onPress={(id: string) => router.push({ pathname: '/report/[id]', params: { id } })} />
-          <View style={styles.divider} />
-          <ActivityRow id="2" icon={<Droplets size={20} color="#378ADD" />} title="Water leak — Indiranagar" time="5 hrs ago" status="In Review" onPress={(id: string) => router.push({ pathname: '/report/[id]', params: { id } })} />
+          {dataLoading ? (
+            <ActivityIndicator color="#1a7a4a" />
+          ) : notifications.length > 0 ? (
+            notifications.slice(0, 3).map((notif, idx) => (
+              <View key={notif.id}>
+                <TouchableOpacity
+                  style={styles.activityRow}
+                  onPress={() => notif.report_id && router.push({ pathname: '/report/[id]', params: { id: notif.report_id } })}
+                >
+                  <View style={[styles.activityIcon, { backgroundColor: notif.type === 'status_change' ? '#E8F5EE' : notif.type === 'xp_award' ? '#FFF7ED' : '#EFF6FF' }]}>
+                    <Text style={{ fontSize: 18 }}>
+                      {notif.type === 'status_change' ? '📋' : notif.type === 'xp_award' ? '⭐' : '🏆'}
+                    </Text>
+                  </View>
+                  <View style={styles.activityDetails}>
+                    <Text style={styles.activityTitle} numberOfLines={1}>{notif.body}</Text>
+                    <Text style={styles.activityTime}>{formatRelativeTime(notif.time)}</Text>
+                  </View>
+                  {notif.unread && <View style={styles.unreadDot} />}
+                </TouchableOpacity>
+                {idx < Math.min(notifications.length, 3) - 1 && <View style={styles.divider} />}
+              </View>
+            ))
+          ) : (
+            <Text style={styles.emptyText}>No recent activity yet.</Text>
+          )}
         </View>
 
         <View style={{ height: 40 }} />
@@ -270,14 +346,19 @@ export default function HomeScreen() {
           </View>
           <View style={styles.searchBar}>
             <Search size={20} color="#888" />
-            <TextInput style={styles.searchInput} placeholder="Search major cities..." value={searchQuery} onChangeText={setSearchQuery} />
+            <TextInput style={styles.searchInput} placeholder="Search cities..." value={searchQuery} onChangeText={setSearchQuery} />
           </View>
-          <FlatList data={filteredCities} keyExtractor={item => item} renderItem={({ item }) => (
-            <TouchableOpacity style={styles.cityItem} onPress={() => { setSelectedCity(item); setCityModalVisible(false); setSearchQuery(""); }}>
-              <MapPin size={18} color="#666" />
-              <Text style={styles.cityItemText}>{item}</Text>
-            </TouchableOpacity>
-          )} contentContainerStyle={styles.cityList} />
+          <FlatList
+            data={filteredCities}
+            keyExtractor={item => item}
+            renderItem={({ item }) => (
+              <TouchableOpacity style={styles.cityItem} onPress={() => { setSelectedCity(item); setCityModalVisible(false); setSearchQuery(""); }}>
+                <MapPin size={18} color="#666" />
+                <Text style={styles.cityItemText}>{item}</Text>
+              </TouchableOpacity>
+            )}
+            contentContainerStyle={styles.cityList}
+          />
         </SafeAreaView>
       </Modal>
 
@@ -286,17 +367,25 @@ export default function HomeScreen() {
         <TouchableOpacity style={styles.modalBackdrop} activeOpacity={1} onPress={() => setNotifModalVisible(false)}>
           <View style={styles.notifDropdown}>
             <Text style={styles.notifTitle}>Notifications</Text>
-            {MOCK_NOTIFICATIONS.map(notif => (
-              <View key={notif.id} style={styles.notifItem}>
-                <View style={[styles.notifDot, !notif.unread && { backgroundColor: 'transparent' }]} />
-                <View style={{ flex: 1 }}>
-                  <Text style={styles.notifItemTitle}>{notif.title}</Text>
-                  <Text style={styles.notifItemBody}>{notif.body}</Text>
-                  <Text style={styles.notifItemTime}>{notif.time}</Text>
+            {dataLoading ? (
+              <ActivityIndicator color="#1a7a4a" />
+            ) : notifications.length === 0 ? (
+              <Text style={{ color: '#6B7280', fontSize: 13 }}>No notifications yet.</Text>
+            ) : (
+              notifications.slice(0, 5).map(notif => (
+                <View key={notif.id} style={styles.notifItem}>
+                  <View style={[styles.notifDot, !notif.unread && { backgroundColor: 'transparent' }]} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.notifItemTitle}>{notif.title}</Text>
+                    <Text style={styles.notifItemBody}>{notif.body}</Text>
+                    <Text style={styles.notifItemTime}>{formatRelativeTime(notif.time)}</Text>
+                  </View>
                 </View>
-              </View>
-            ))}
-            <TouchableOpacity style={styles.notifClose} onPress={() => setNotifModalVisible(false)}><Text style={styles.notifCloseText}>Close</Text></TouchableOpacity>
+              ))
+            )}
+            <TouchableOpacity style={styles.notifClose} onPress={() => setNotifModalVisible(false)}>
+              <Text style={styles.notifCloseText}>Close</Text>
+            </TouchableOpacity>
           </View>
         </TouchableOpacity>
       </Modal>
@@ -305,28 +394,37 @@ export default function HomeScreen() {
   );
 }
 
-function ChallengeCard({ icon, title, xp, color, onPress }: any) {
-  return (
-    <TouchableOpacity style={styles.challengeCard} onPress={onPress}>
-      <View style={[styles.iconCircle, { backgroundColor: color + '20' }]}>{icon}</View>
-      <Text style={styles.challengeTitle}>{title}</Text>
-      <View style={[styles.xpPill, { backgroundColor: color + '20' }]}>
-        <Text style={[styles.xpPillText, { color: color }]}>{xp} XP</Text>
-      </View>
-    </TouchableOpacity>
-  );
+// ── Helper: Human-readable relative time ────────────────────
+function formatRelativeTime(isoString: string): string {
+  const diff = Date.now() - new Date(isoString).getTime();
+  const mins = Math.floor(diff / 60000);
+  const hours = Math.floor(diff / 3600000);
+  const days = Math.floor(diff / 86400000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  if (hours < 24) return `${hours}h ago`;
+  return `${days}d ago`;
 }
 
-function ActivityRow({ id, icon, title, time, status, onPress }: any) {
+// ── Challenge type → color mapping ───────────────────────────
+const CHALLENGE_COLORS: Record<string, string> = {
+  daily: '#F59E0B',
+  weekly: '#7F77DD',
+  community: '#1a7a4a',
+};
+
+function ChallengeCard({ title, xp, type, onPress }: { title: string; xp: string; type: string; onPress: () => void }) {
+  const color = CHALLENGE_COLORS[type] ?? '#1a7a4a';
   return (
-    <TouchableOpacity style={styles.activityRow} onPress={() => onPress(id)}>
-      <View style={[styles.activityIcon, { backgroundColor: '#F0F2F5' }]}>{icon}</View>
-      <View style={styles.activityDetails}>
-        <Text style={styles.activityTitle}>{title}</Text>
-        <Text style={styles.activityTime}>{time}</Text>
+    <TouchableOpacity style={styles.challengeCard} onPress={onPress}>
+      <View style={[styles.iconCircle, { backgroundColor: color + '20' }]}>
+        <Text style={{ fontSize: 16 }}>
+          {type === 'daily' ? '🌤️' : type === 'weekly' ? '📅' : '🌍'}
+        </Text>
       </View>
-      <View style={[styles.statusChip, { backgroundColor: status === 'Resolved' ? '#E8F5EE' : '#FDF2E2' }]}>
-        <Text style={[styles.statusChipText, { color: status === 'Resolved' ? '#1a7a4a' : '#EF9F27' }]}>{status}</Text>
+      <Text style={styles.challengeTitle} numberOfLines={2}>{title}</Text>
+      <View style={[styles.xpPill, { backgroundColor: color + '20' }]}>
+        <Text style={[styles.xpPillText, { color }]}>{xp} XP</Text>
       </View>
     </TouchableOpacity>
   );
@@ -341,126 +439,33 @@ const styles = StyleSheet.create({
   logoText: { fontSize: 18, fontWeight: '800', color: '#1a7a4a' },
   citySelector: { flexDirection: 'row', alignItems: 'center', backgroundColor: '#F0F2F5', paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, gap: 4 },
   cityText: { fontSize: 13, fontWeight: '600', color: '#333' },
-  rightHeader: { flexDirection: 'row', alignItems: 'center', gap: 12 },
+  rightHeader: { flexDirection: 'row', alignItems: 'center', gap: 14 },
+  logoutBtn: { padding: 4 },
   bellIcon: { position: 'relative' },
   badge: { position: 'absolute', top: 0, right: 2, width: 8, height: 8, backgroundColor: '#E8593C', borderRadius: 4, borderWidth: 1, borderColor: '#FFF' },
   avatar: { width: 32, height: 32, backgroundColor: '#1a7a4a', borderRadius: 16, justifyContent: 'center', alignItems: 'center' },
   avatarText: { color: '#FFF', fontSize: 11, fontWeight: 'bold' },
   impactCard: {
-    marginHorizontal: 16,
-    backgroundColor: '#065F46', // Deep emerald green from reference
-    borderRadius: 28, // More rounded for premium feel
-    padding: 24,
-    marginTop: 12,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 10,
-    elevation: 5,
+    marginHorizontal: 16, backgroundColor: '#065F46', borderRadius: 28, padding: 24,
+    marginTop: 12, shadowColor: '#000', shadowOffset: { width: 0, height: 4 }, shadowOpacity: 0.2, shadowRadius: 10, elevation: 5,
   },
-  impactHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 24,
-  },
-  impactTextContainer: {
-    flex: 1,
-    marginRight: 12,
-  },
-  impactSubtitle: {
-    color: '#D1FAE5',
-    fontSize: 12,
-    fontWeight: '900',
-    letterSpacing: 1.5,
-    marginBottom: 6,
-    opacity: 0.8,
-  },
-  impactTitle: {
-    color: '#FFFFFF',
-    fontSize: 26,
-    fontWeight: '900',
-    lineHeight: 32,
-  },
-  scoreCircle: {
-    width: 68,
-    height: 68,
-    borderRadius: 34,
-    borderWidth: 5,
-    borderColor: 'rgba(255,255,255,0.15)',
-    justifyContent: 'center',
-    alignItems: 'center',
-    position: 'relative',
-  },
-  scoreProgress: {
-    position: 'absolute',
-    width: 68,
-    height: 68,
-    borderRadius: 34,
-    borderWidth: 5,
-    borderColor: 'transparent',
-    borderTopColor: '#34D399',
-    borderRightColor: '#34D399',
-  },
-  scorePercent: {
-    color: '#FFFFFF',
-    fontSize: 16,
-    fontWeight: '900',
-  },
-  impactStats: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-  },
-  statBox: {
-    width: (Dimensions.get('window').width - 80) / 3, // Precise calculation for alignment
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    borderRadius: 18,
-    paddingVertical: 16,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  statNumber: {
-    color: '#FFFFFF',
-    fontSize: 22,
-    fontWeight: '900',
-    marginBottom: 2,
-  },
-  statLabel: {
-    color: '#A7F3D0',
-    fontSize: 8.5,
-    fontWeight: '800',
-    textAlign: 'center',
-    letterSpacing: 0.5,
-  },
+  impactHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 24 },
+  impactTextContainer: { flex: 1, marginRight: 12 },
+  impactSubtitle: { color: '#D1FAE5', fontSize: 12, fontWeight: '900', letterSpacing: 1.5, marginBottom: 6, opacity: 0.8 },
+  impactTitle: { color: '#FFFFFF', fontSize: 22, fontWeight: '900', lineHeight: 28 },
+  scoreCircle: { width: 68, height: 68, borderRadius: 34, borderWidth: 5, borderColor: 'rgba(255,255,255,0.15)', justifyContent: 'center', alignItems: 'center', position: 'relative' },
+  scoreProgress: { position: 'absolute', width: 68, height: 68, borderRadius: 34, borderWidth: 5, borderColor: 'transparent', borderTopColor: '#34D399', borderRightColor: '#34D399' },
+  scorePercent: { color: '#FFFFFF', fontSize: 16, fontWeight: '900' },
+  impactStats: { flexDirection: 'row', justifyContent: 'space-between' },
+  statBox: { width: (Dimensions.get('window').width - 80) / 3, backgroundColor: 'rgba(255,255,255,0.08)', borderRadius: 18, paddingVertical: 16, alignItems: 'center', justifyContent: 'center' },
+  statNumber: { color: '#FFFFFF', fontSize: 22, fontWeight: '900', marginBottom: 2 },
+  statLabel: { color: '#A7F3D0', fontSize: 8.5, fontWeight: '800', textAlign: 'center', letterSpacing: 0.5 },
   mapCard: { marginHorizontal: 16, height: 220, backgroundColor: '#E5E7EB', borderRadius: 24, overflow: 'hidden', position: 'relative', marginVertical: 12, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 10, elevation: 3 },
   mapCentered: { flex: 1, justifyContent: 'center', alignItems: 'center' },
-  mapDot: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-    borderWidth: 2,
-    borderColor: '#FFF',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.3,
-    shadowRadius: 2,
-    elevation: 4,
-  },
-  calloutBubble: {
-    backgroundColor: 'rgba(255, 255, 255, 0.95)',
-    borderRadius: 12,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: '#E5E7EB',
-    minWidth: 80,
-    alignItems: 'center',
-  },
-  calloutText: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: '#111827',
-  },
+  mapDot: { width: 12, height: 12, borderRadius: 6, borderWidth: 2, borderColor: '#FFF', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.3, shadowRadius: 2, elevation: 4 },
+  calloutBubble: { backgroundColor: 'rgba(255,255,255,0.95)', borderRadius: 12, paddingHorizontal: 12, paddingVertical: 8, borderWidth: 1, borderColor: '#E5E7EB', minWidth: 80, maxWidth: 160, alignItems: 'center' },
+  calloutText: { fontSize: 12, fontWeight: '700', color: '#111827' },
+  calloutStatus: { fontSize: 10, color: '#6B7280', textTransform: 'capitalize', marginTop: 2 },
   mapOverlayPill: { position: 'absolute', bottom: 16, left: 16, backgroundColor: '#F9FAFB', paddingHorizontal: 16, paddingVertical: 10, borderRadius: 30, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 4, elevation: 3 },
   mapOverlayText: { color: '#111827', fontSize: 14, fontWeight: '700' },
   recenterBtn: { position: 'absolute', top: 16, right: 16, width: 40, height: 40, backgroundColor: '#FFF', borderRadius: 20, justifyContent: 'center', alignItems: 'center', shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.1, shadowRadius: 4, elevation: 3 },
@@ -469,17 +474,17 @@ const styles = StyleSheet.create({
   seeAllText: { fontSize: 13, fontWeight: '600', color: '#1a7a4a' },
   challengeCard: { width: 140, backgroundColor: '#FFF', borderRadius: 16, padding: 14, marginRight: 12, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 8, elevation: 2 },
   iconCircle: { width: 36, height: 36, borderRadius: 18, justifyContent: 'center', alignItems: 'center', marginBottom: 10 },
-  challengeTitle: { fontSize: 14, fontWeight: '700', color: '#333', marginBottom: 6 },
+  challengeTitle: { fontSize: 13, fontWeight: '700', color: '#333', marginBottom: 6 },
   xpPill: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, alignSelf: 'flex-start' },
   xpPillText: { fontSize: 11, fontWeight: '800' },
+  emptyText: { color: '#9CA3AF', fontSize: 13, marginLeft: 16, marginBottom: 12 },
   activityList: { marginHorizontal: 16, backgroundColor: '#FFF', borderRadius: 16, padding: 16, shadowColor: '#000', shadowOffset: { width: 0, height: 2 }, shadowOpacity: 0.05, shadowRadius: 8, elevation: 2 },
   activityRow: { flexDirection: 'row', alignItems: 'center' },
   activityIcon: { width: 40, height: 40, borderRadius: 12, justifyContent: 'center', alignItems: 'center', marginRight: 12 },
   activityDetails: { flex: 1 },
-  activityTitle: { fontSize: 14, fontWeight: '700', color: '#111827', marginBottom: 4 },
+  activityTitle: { fontSize: 13, fontWeight: '700', color: '#111827', marginBottom: 4 },
   activityTime: { fontSize: 12, color: '#888' },
-  statusChip: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
-  statusChipText: { fontSize: 11, fontWeight: '800' },
+  unreadDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#1a7a4a', marginLeft: 8 },
   divider: { height: 1, backgroundColor: '#F3F4F6', marginVertical: 12 },
   modalContainer: { flex: 1, backgroundColor: '#FFF' },
   modalHeader: { flexDirection: 'row', justifyContent: 'space-between', padding: 20, alignItems: 'center', borderBottomWidth: 1, borderBottomColor: '#EEE' },
@@ -495,7 +500,7 @@ const styles = StyleSheet.create({
   notifItem: { flexDirection: 'row', marginBottom: 15, paddingBottom: 10, borderBottomWidth: 1, borderBottomColor: '#F3F4F6' },
   notifDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#1a7a4a', marginTop: 6, marginRight: 10 },
   notifItemTitle: { fontSize: 14, fontWeight: '700', color: '#111827' },
-  notifItemBody: { fontSize: 13, color: '#4B5563', marginTop: 2 },
+  notifItemBody: { fontSize: 12, color: '#4B5563', marginTop: 2 },
   notifItemTime: { fontSize: 11, color: '#9CA3AF', marginTop: 4 },
   notifClose: { alignItems: 'center', paddingTop: 10 },
   notifCloseText: { color: '#1a7a4a', fontWeight: '800' },

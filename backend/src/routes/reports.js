@@ -57,6 +57,40 @@ router.get('/mine', authenticate, async (req, res) => {
   res.json({ reports: data });
 });
 
+// ── GET /reports/nearby ──────────────────────────────────────
+// Returns reports within ~radius km of lat/lng using bounding box
+router.get('/nearby', authenticate, async (req, res) => {
+  const lat    = parseFloat(req.query.lat);
+  const lng    = parseFloat(req.query.lng);
+  const radius = parseFloat(req.query.radius) || 5; // km
+  const limit  = Math.min(parseInt(req.query.limit) || 30, 100);
+
+  if (isNaN(lat) || isNaN(lng)) {
+    return res.status(400).json({ error: 'lat and lng query params are required' });
+  }
+
+  // 1 degree latitude ≈ 111 km
+  const delta = radius / 111;
+
+  const { data, error } = await supabase
+    .from('reports')
+    .select(`
+      id, title, lat, lng, status, priority,
+      issue_categories ( id, name, icon, color )
+    `)
+    .not('lat', 'is', null)
+    .not('lng', 'is', null)
+    .gte('lat', lat - delta)
+    .lte('lat', lat + delta)
+    .gte('lng', lng - delta)
+    .lte('lng', lng + delta)
+    .order('created_at', { ascending: false })
+    .limit(limit);
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ reports: data, count: data.length });
+});
+
 // ── GET /reports/:id ─────────────────────────────────────────
 router.get('/:id', [param('id').isUUID()], validate, authenticate, async (req, res) => {
   const { data, error } = await supabase
@@ -143,9 +177,17 @@ router.post('/', authenticate, [
 
   if (error) return res.status(500).json({ error: error.message });
 
-  // Update user XP
-  await supabase.rpc('increment_xp', { uid: req.user.id, amount: xp_awarded })
-    .catch(() => {}); // non-fatal if RPC not yet created
+  // Update user XP manually since increment_xp RPC is missing
+  try {
+    const { data: profile } = await supabase.from('profiles').select('xp_total').eq('id', req.user.id).single();
+    if (profile) {
+      await supabase.from('profiles')
+        .update({ xp_total: (profile.xp_total || 0) + xp_awarded })
+        .eq('id', req.user.id);
+    }
+  } catch (err) {
+    console.warn('[XP Warning]', err.message);
+  }
 
   res.status(201).json({ report, xp_awarded });
 });

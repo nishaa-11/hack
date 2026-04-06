@@ -27,10 +27,18 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
 
   const fetchProfile = async () => {
     try {
-      const { profile: p } = await ProfilesAPI.me();
-      setProfile(p);
-    } catch {
-      setProfile(null);
+      // 5-second safety timeout so we don't hang the app if the backend is slow
+      const result = await Promise.race([
+        ProfilesAPI.me(),
+        new Promise<never>((_, reject) => 
+          setTimeout(() => reject(new Error('Profile fetch timeout')), 5000)
+        )
+      ]) as { profile: Profile };
+      
+      setProfile(result.profile);
+    } catch (err) {
+      console.warn('[AUTH] Error fetching profile:', err);
+      // Ensure we don't block the app; we can still show the UI with null profile
     }
   };
 

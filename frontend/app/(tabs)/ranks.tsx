@@ -41,28 +41,26 @@ export default function RanksScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
 
-  const loadData = useCallback(async () => {
+  const hasLoaded = React.useRef(false);
+
+  const loadData = useCallback(async (showSpinner = false) => {
     try {
-      if (entries.length === 0) setLoading(true);
+      if (showSpinner) setLoading(true);
       const queryScope = activeTab.toLowerCase();
       const result = await LeaderboardAPI.get(queryScope, 'all_time', 25);
-      const modifiedLeaderboard = result.leaderboard.map(record => {
-        if (record.name?.toLowerCase().includes('nisha')) {
-          return { ...record, xp: 590 };
-        }
-        return record;
-      });
-      setEntries(modifiedLeaderboard);
+      setEntries(result.leaderboard);
     } catch (err) {
       console.warn('Leaderboard Error:', err);
     } finally {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [activeTab, entries.length]);
+  }, [activeTab]);
 
   useEffect(() => {
-    loadData();
+    const firstLoad = !hasLoaded.current;
+    hasLoaded.current = true;
+    loadData(firstLoad);
   }, [loadData]);
 
   const onRefresh = () => {
@@ -114,8 +112,7 @@ export default function RanksScreen() {
   }, [entries]);
 
   const myInitial = myProfile?.name ? myProfile.name.charAt(0).toUpperCase() : 'N';
-  const isNisha = myProfile?.name?.toLowerCase().includes('nisha') || true;
-  const myXp = isNisha ? 590 : (myProfile?.xp_total ?? 550);
+  const myXp = myProfile?.xp_total ?? 0;
 
   return (
     <SafeAreaView style={styles.safeArea}>
