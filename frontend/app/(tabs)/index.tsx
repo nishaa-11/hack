@@ -253,9 +253,11 @@ export default function HomeScreen() {
         {/* RECENT ACTIVITY FEED */}
         <Text style={[styles.sectionTitle, { marginLeft: 16, marginTop: 24, marginBottom: 12 }]}>Recent activity</Text>
         <View style={styles.activityList}>
-          <ActivityRow id="1" icon={<Trash2 size={20} color="#E8593C" />} title="Garbage dump — Koramangala" time="2 hrs ago" status="Resolved" onPress={(id: string) => router.push({ pathname: '/report/[id]', params: { id } })} />
+          <ActivityRow id="1" icon={<Leaf size={20} color="#1a7a4a" />} title="Broken Bench in Cubbon Park" time="Oct 12, 2023" status="Resolved" onPress={(id: string) => router.push({ pathname: '/report/[id]', params: { id } })} />
           <View style={styles.divider} />
-          <ActivityRow id="2" icon={<Droplets size={20} color="#378ADD" />} title="Water leak — Indiranagar" time="5 hrs ago" status="In Review" onPress={(id: string) => router.push({ pathname: '/report/[id]', params: { id } })} />
+          <ActivityRow id="2" icon={<Zap size={20} color="#F59E0B" />} title="Streetlight flickering near MG Road" time="Oct 14, 2023" status="In Review" onPress={(id: string) => router.push({ pathname: '/report/[id]', params: { id } })} />
+          <View style={styles.divider} />
+          <ActivityRow id="3" icon={<Trash2 size={20} color="#6B7280" />} title="Overflowing bin - Indiranagar" time="Today" status="Submitted" onPress={(id: string) => router.push({ pathname: '/report/[id]', params: { id } })} />
         </View>
 
         <View style={{ height: 40 }} />
