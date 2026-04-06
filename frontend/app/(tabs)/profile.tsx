@@ -29,6 +29,7 @@ import {
   Trash2,
   Bus,
   Coffee,
+  LogOut,
 } from 'lucide-react-native';
 import { useAuth } from '@/context/AuthContext';
 import {
@@ -58,11 +59,11 @@ function badgeIconFor(name: string, color: string) {
 
 // Status chip styles
 const STATUS_COLORS: Record<string, { bg: string; text: string; label: string }> = {
-  resolved:    { bg: '#E8F5EE', text: '#1a7a4a', label: 'RESOLVED' },
-  in_review:   { bg: '#FEF3C7', text: '#D97706', label: 'IN REVIEW' },
-  submitted:   { bg: '#F3F4F6', text: '#6B7280', label: 'SUBMITTED' },
+  resolved: { bg: '#E8F5EE', text: '#1a7a4a', label: 'RESOLVED' },
+  in_review: { bg: '#FEF3C7', text: '#D97706', label: 'IN REVIEW' },
+  submitted: { bg: '#F3F4F6', text: '#6B7280', label: 'SUBMITTED' },
   in_progress: { bg: '#EFF6FF', text: '#2563EB', label: 'IN PROGRESS' },
-  rejected:    { bg: '#FEE2E2', text: '#DC2626', label: 'REJECTED' },
+  rejected: { bg: '#FEE2E2', text: '#DC2626', label: 'REJECTED' },
 };
 
 function statusStyle(status: string) {
@@ -83,81 +84,23 @@ export default function ProfileScreen() {
   const loadData = useCallback(async () => {
     try {
       setError(null);
-      const me = await ProfilesAPI.me();
-      setProfile(me.profile);
-      setLoading(false);
 
-      const [impactRes, badgesRes, reportsRes, rewardsRes] = await Promise.allSettled([
+      // Fire all 5 requests in parallel — no sequential waterfall
+      const [meRes, impactRes, badgesRes, reportsRes, rewardsRes] = await Promise.allSettled([
+        ProfilesAPI.me(),
         ProfilesAPI.impact(),
         ProfilesAPI.badges(),
         ReportsAPI.mine(),
         RewardsAPI.mine(),
       ]);
 
-      if (impactRes.status === 'fulfilled') {
-        let currentImpact = impactRes.value.impact;
-        const isNisha = me.profile?.name?.toLowerCase().includes('nisha') || true;
-        if (!currentImpact || currentImpact.total_reports === 0 || isNisha) {
-          currentImpact = {
-            ...currentImpact,
-            total_reports: isNisha ? 3 : Math.max(currentImpact?.total_reports ?? 0, 2),
-            resolved_reports: isNisha ? 1 : Math.max(currentImpact?.resolved_reports ?? 0, 1),
-            streak_days: isNisha ? 3 : Math.max(currentImpact?.streak_days ?? 0, 5),
-          } as NeighborhoodImpact;
-        }
-        setImpact(currentImpact);
-      }
-      
-      if (badgesRes.status === 'fulfilled') setBadges(badgesRes.value.badges);
-      
-      if (reportsRes.status === 'fulfilled') {
-        let reports = reportsRes.value.reports;
-        const isNisha = me.profile?.name?.toLowerCase().includes('nisha') || true;
-        if (reports.length === 0 || isNisha) {
-          reports = [
-            {
-              id: 'mock1',
-              title: 'Broken Bench in Cubbon Park',
-              status: 'resolved',
-              created_at: '2023-10-12T10:00:00Z',
-              issue_categories: { id: 'c1', name: 'leaf', color: '#1a7a4a' } as any,
-            } as Report,
-            {
-              id: 'mock2',
-              title: 'Streetlight flickering near MG Road',
-              status: 'in_review',
-              created_at: '2023-10-14T10:00:00Z',
-              issue_categories: { id: 'c2', name: 'zap', color: '#F59E0B' } as any,
-            } as Report,
-            {
-              id: 'mock3',
-              title: 'Overflowing bin - Indiranagar',
-              status: 'submitted',
-              created_at: new Date().toISOString(),
-              issue_categories: { id: 'c3', name: 'trash', color: '#6B7280' } as any,
-            } as Report,
-          ];
-        }
-        setMyReports(reports);
-      }
-      
-      if (rewardsRes.status === 'fulfilled') {
-        let redemptions = rewardsRes.value.redemptions;
-        const isNisha = me.profile?.name?.toLowerCase().includes('nisha') || true;
-        if (redemptions.length === 0 || isNisha) {
-          redemptions = [
-            {
-              id: 'reward1',
-              rewards: { title: '20% off BMTC Pass', xp_cost: 200, category: 'bus' } as any,
-            } as Redemption,
-            {
-              id: 'reward2',
-              rewards: { title: 'Café Coffee Day voucher', xp_cost: 250, category: 'coffee' } as any,
-            } as Redemption,
-          ];
-        }
-        setMyRewards(redemptions);
-      }
+      if (meRes.status === 'fulfilled') setProfile(meRes.value.profile);
+      else if (meRes.status === 'rejected') setError(meRes.reason?.message ?? 'Failed to load profile');
+
+      if (impactRes.status === 'fulfilled') setImpact(impactRes.value.impact ?? null);
+      if (badgesRes.status === 'fulfilled') setBadges(badgesRes.value.badges ?? []);
+      if (reportsRes.status === 'fulfilled') setMyReports(reportsRes.value.reports ?? []);
+      if (rewardsRes.status === 'fulfilled') setMyRewards(rewardsRes.value.redemptions ?? []);
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to load profile';
       setError(message);
@@ -174,10 +117,7 @@ export default function ProfileScreen() {
     loadData();
   }, [loadData]);
 
-  let data = profile ?? authProfile;
-  if (data && (data?.name?.toLowerCase().includes('nisha') || true)) {
-    data = { ...data, xp_total: 590 };
-  }
+  const data = profile ?? authProfile;
 
   // XP progress toward next level
   const { xpCurrent, xpNext, progressPercent, progressLabel } = useMemo(() => {
@@ -216,8 +156,8 @@ export default function ProfileScreen() {
   // Build locked placeholder badges to fill grid to 6
   const LOCKED_BADGES = [
     { name: 'Clean City Champion', icon: <Building2 size={26} color="#C0C0C0" /> },
-    { name: 'Guardian',            icon: <ShieldCheck size={26} color="#C0C0C0" /> },
-    { name: 'Top Contributor',     icon: <Users size={26} color="#C0C0C0" /> },
+    { name: 'Guardian', icon: <ShieldCheck size={26} color="#C0C0C0" /> },
+    { name: 'Top Contributor', icon: <Users size={26} color="#C0C0C0" /> },
   ];
 
   if (loading) {
@@ -254,9 +194,14 @@ export default function ProfileScreen() {
             <Leaf size={20} color="#1a7a4a" />
             <Text style={s.logoText}>CivicPulse</Text>
           </View>
-          <View style={s.xpPill}>
-            <Star size={14} color="#1a7a4a" fill="#1a7a4a" />
-            <Text style={s.xpPillText}>{data?.xp_total ?? 0} XP</Text>
+          <View style={{ flexDirection: 'row', gap: 10, alignItems: 'center' }}>
+            <View style={s.xpPill}>
+              <Star size={14} color="#1a7a4a" fill="#1a7a4a" />
+              <Text style={s.xpPillText}>{data?.xp_total ?? 0} XP</Text>
+            </View>
+            <TouchableOpacity style={s.logoutBtnSmall} onPress={signOut}>
+              <LogOut size={18} color="#E8593C" />
+            </TouchableOpacity>
           </View>
         </View>
 
@@ -410,8 +355,8 @@ export default function ProfileScreen() {
                 key={r.id}
                 style={[s.rewardCard, idx < Math.min(myRewards.length, 4) - 1 && s.reportCardGap]}
               >
-                <View style={[s.rewardIconBox, { backgroundColor: r.rewards.category === 'coffee' ? '#F3E8FF' : '#E8F5EE' }]}>
-                  {r.rewards.category === 'coffee' ? (
+                <View style={[s.rewardIconBox, { backgroundColor: r.rewards.type === 'voucher' ? '#F3E8FF' : '#E8F5EE' }]}>
+                  {r.rewards.type === 'voucher' ? (
                     <Coffee size={22} color="#8B5CF6" />
                   ) : (
                     <Bus size={22} color="#1a7a4a" />
@@ -466,6 +411,13 @@ const s = StyleSheet.create({
     borderRadius: 999, borderWidth: 1, borderColor: '#C8E6D5',
   },
   xpPillText: { fontSize: 13, fontWeight: '700', color: GREEN },
+  logoutBtnSmall: {
+    backgroundColor: WHITE,
+    padding: 6,
+    borderRadius: 8,
+    borderWidth: 1,
+    borderColor: '#FEE2E2',
+  },
 
   // Hero
   hero: { alignItems: 'center', paddingTop: 8, paddingBottom: 24 },

@@ -8,8 +8,11 @@
 import { supabase } from './supabase';
 import { Platform } from 'react-native';
 
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL
+const BASE_URL = process.env.EXPO_PUBLIC_API_URL 
   ?? (Platform.OS === 'android' ? 'http://10.0.2.2:3001/api/v1' : 'http://localhost:3001/api/v1');
+
+// Note: If you're testing on a physical device, 'localhost' will NOT work.
+// The device needs your computer's actual local WiFi IP address.
 
 async function getAuthHeader(): Promise<Record<string, string>> {
   const { data } = await supabase.auth.getSession();
@@ -21,32 +24,50 @@ interface RequestOptions extends Omit<RequestInit, 'body'> {
   body?: Record<string, unknown> | FormData;
 }
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const authHeaders = await getAuthHeader();
-  const isFormData = options.body instanceof FormData;
+export function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  return new Promise(async (resolve, reject) => {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 10000); // 10s timeout
 
-  const headers: Record<string, string> = {
-    ...authHeaders,
-    ...(!isFormData ? { 'Content-Type': 'application/json' } : {}),
-    ...(options.headers as Record<string, string> | undefined),
-  };
+    try {
+      const authHeaders = await getAuthHeader();
+      const isFormData = options.body instanceof FormData;
 
-  const response = await fetch(`${BASE_URL}${path}`, {
-    ...options,
-    headers,
-    body: isFormData
-      ? (options.body as FormData)
-      : options.body
-      ? JSON.stringify(options.body)
-      : undefined,
+      const headers: Record<string, string> = {
+        ...authHeaders,
+        ...(!isFormData ? { 'Content-Type': 'application/json' } : {}),
+        ...(options.headers as Record<string, string> | undefined),
+      };
+
+      const response = await fetch(`${BASE_URL}${path}`, {
+        ...options,
+        headers,
+        signal: controller.signal,
+        body: isFormData
+          ? (options.body as FormData)
+          : options.body
+          ? JSON.stringify(options.body)
+          : undefined,
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        return reject(new Error(payload?.error ?? `HTTP ${response.status}`));
+      }
+
+      const json = await response.json();
+      resolve(json as T);
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      if (err.name === 'AbortError') {
+        reject(new Error('Network timeout: The server is taking too long to respond. Check your connection or API IP.'));
+      } else {
+        reject(err);
+      }
+    }
   });
-
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({}));
-    throw new Error(payload?.error ?? `HTTP ${response.status}`);
-  }
-
-  return response.json() as Promise<T>;
 }
 
 // ── Convenience helpers ──────────────────────────────────────
@@ -110,6 +131,20 @@ export const LocationsAPI = {
   cities: () => api.get<{ cities: City[] }>('/locations/cities'),
   wards:  (city_id?: string) => api.get<{ wards: Ward[] }>(`/locations/wards${city_id ? `?city_id=${city_id}` : ''}`),
 };
+
+// NOTIFICATIONS
+export const NotificationsAPI = {
+  list: () => api.get<{ notifications: Notification[] }>('/notifications'),
+};
+
+// NEARBY REPORTS
+export const NearbyReportsAPI = {
+  get: (lat: number, lng: number, radius = 5) =>
+    api.get<{ reports: NearbyReport[]; count: number }>(
+      `/reports/nearby?lat=${lat}&lng=${lng}&radius=${radius}`
+    ),
+};
+
 
 // ── Types ────────────────────────────────────────────────────
 
@@ -266,4 +301,29 @@ export interface Ward {
   zone: string | null;
   city_id?: string;
   cities?: City;
+}
+
+export interface Notification {
+  id: string;
+  type: 'status_change' | 'xp_award' | 'new_challenge';
+  title: string;
+  body: string;
+  report_id?: string;
+  time: string;
+  unread: boolean;
+}
+
+export interface NearbyReport {
+  id: string;
+  title: string | null;
+  lat: number;
+  lng: number;
+  status: string;
+  priority: string;
+  issue_categories?: {
+    id: string;
+    name: string;
+    icon: string | null;
+    color: string | null;
+  };
 }

@@ -6,7 +6,8 @@ if (!apiKey) {
   console.warn('Backend warning: GEMINI_API_KEY is not set in environment.');
 }
 const genAI = new GoogleGenerativeAI(apiKey || 'uninitialized');
-const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
+const model = genAI.getGenerativeModel({ model: modelName });
 
 /**
  * Classifies an incoming issue title and description into the most applicable domain category
@@ -38,7 +39,7 @@ Return ONLY the raw JSON format string, nothing else.`;
 
     const result = await model.generateContent(prompt);
     const text = result.response.text().trim();
-    
+
     // Clean up if the model wrapped it in markdown code blocks
     let cleanedText = text;
     if (cleanedText.startsWith('\`\`\`json')) {

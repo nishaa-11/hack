@@ -10,8 +10,9 @@ const reportsRouter     = require('./routes/reports');
 const challengesRouter  = require('./routes/challenges');
 const leaderboardRouter = require('./routes/leaderboard');
 const rewardsRouter     = require('./routes/rewards');
-const categoriesRouter  = require('./routes/categories');
-const locationsRouter   = require('./routes/locations');
+const categoriesRouter      = require('./routes/categories');
+const locationsRouter       = require('./routes/locations');
+const notificationsRouter   = require('./routes/notifications');
 
 const app = express();
 
@@ -50,8 +51,9 @@ app.use('/api/v1/reports',     reportsRouter);
 app.use('/api/v1/challenges',  challengesRouter);
 app.use('/api/v1/leaderboard', leaderboardRouter);
 app.use('/api/v1/rewards',     rewardsRouter);
-app.use('/api/v1/categories',  categoriesRouter);
-app.use('/api/v1/locations',   locationsRouter);
+app.use('/api/v1/categories',      categoriesRouter);
+app.use('/api/v1/locations',       locationsRouter);
+app.use('/api/v1/notifications',   notificationsRouter);
 
 // ── 404 Handler ───────────────────────────────────────────────
 app.use((_req, res) => {

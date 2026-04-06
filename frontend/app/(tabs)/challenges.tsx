@@ -28,15 +28,15 @@ export default function ChallengesScreen() {
   const [busyId, setBusyId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (showSpinner = false) => {
     try {
-      if (challenges.length === 0) setLoading(true);
+      if (showSpinner) setLoading(true);
       setError(null);
       const [listRes, mineRes] = await Promise.allSettled([
         ChallengesAPI.list(filter),
         ChallengesAPI.mine(),
       ]);
-      
+
       if (listRes.status === 'fulfilled') setChallenges(listRes.value.challenges);
       if (mineRes.status === 'fulfilled') setMine(mineRes.value.challenges);
     } catch (err) {
@@ -46,11 +46,11 @@ export default function ChallengesScreen() {
       setLoading(false);
       setRefreshing(false);
     }
-  }, [filter, challenges.length]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filter]);
 
-  useEffect(() => {
-    load();
-  }, [load]);
+  // Initial load — show spinner
+  useEffect(() => { load(true); }, [load]);
 
   const myByChallengeId = useMemo(() => {
     const map = new Map<string, UserChallenge>();
