@@ -1,0 +1,532 @@
+-- ============================================================
+-- CivicPulse — Supabase Migration Script
+-- Run this in Supabase SQL Editor (Dashboard > SQL Editor > New query)
+-- ============================================================
+
+-- Enable UUID extension (already on by default in Supabase)
+create extension if not exists "uuid-ossp";
+
+-- ============================================================
+-- 1. GEOGRAPHY / LOCATION
+-- ============================================================
+
+create table cities (
+  id          uuid primary key default uuid_generate_v4(),
+  name        text not null,
+  state       text not null,
+  created_at  timestamptz default now()
+);
+
+create table wards (
+  id           uuid primary key default uuid_generate_v4(),
+  city_id      uuid not null references cities(id) on delete cascade,
+  name         text not null,
+  ward_number  int  not null,
+  zone         text,
+  created_at   timestamptz default now()
+);
+
+-- ============================================================
+-- 2. USERS (extends Supabase auth.users)
+-- ============================================================
+
+create table public.profiles (
+  id            uuid primary key references auth.users(id) on delete cascade,
+  name          text,
+  phone         text,
+  ward_id       uuid references wards(id),
+  xp_total      int  not null default 0,
+  level         int  not null default 1,
+  -- role: 'citizen' | 'authority' | 'admin'
+  role          text not null default 'citizen',
+  -- title shown under name e.g. 'Activist', 'Guardian', 'Influencer'
+  title         text default 'Newcomer',
+  streak_days   int  not null default 0,
+  last_active   timestamptz default now(),
+  avatar_url    text,
+  created_at    timestamptz default now()
+);
+
+-- Auto-create profile row when a user signs up
+create or replace function public.handle_new_user()
+returns trigger language plpgsql security definer as $$
+begin
+  insert into public.profiles (id, name)
+  values (new.id, new.raw_user_meta_data->>'full_name');
+  return new;
+end;
+$$;
+
+create trigger on_auth_user_created
+  after insert on auth.users
+  for each row execute function public.handle_new_user();
+
+-- ============================================================
+-- 3. ISSUE TAXONOMY
+-- ============================================================
+
+create table issue_categories (
+  id                uuid primary key default uuid_generate_v4(),
+  name              text not null unique,
+  icon              text,                   -- icon name / emoji key
+  color             text,                   -- hex color string
+  default_authority text,                   -- e.g. 'BBMP Solid Waste Dept.'
+  base_xp           int  not null default 10,
+  created_at        timestamptz default now()
+);
+
+create table issue_subcategories (
+  id                uuid primary key default uuid_generate_v4(),
+  category_id       uuid not null references issue_categories(id) on delete cascade,
+  name              text not null,
+  -- priority_default: 'high' | 'medium' | 'low'
+  priority_default  text not null default 'medium',
+  -- override the category-level authority for this subtype
+  authority_override text,
+  -- numeric 1–100 for queue sorting
+  priority_score    int  not null default 50,
+  created_at        timestamptz default now()
+);
+
+-- ============================================================
+-- 4. REPORTS
+-- ============================================================
+
+create table reports (
+  id                  uuid primary key default uuid_generate_v4(),
+  user_id             uuid not null references public.profiles(id) on delete set null,
+  category_id         uuid references issue_categories(id),
+  subcategory_id      uuid references issue_subcategories(id),
+  ward_id             uuid references wards(id),
+
+  title               text,
+  description         text,
+
+  -- geo
+  lat                 double precision,
+  lng                 double precision,
+  address             text,
+
+  -- status: 'submitted' | 'in_review' | 'in_progress' | 'resolved' | 'rejected'
+  status              text not null default 'submitted',
+  -- priority: 'high' | 'medium' | 'low'
+  priority            text not null default 'medium',
+
+  authority_routed_to text,
+  ai_confidence       real,                  -- 0.0–1.0
+  ai_classified       boolean default false,
+
+  xp_awarded          int  default 0,
+  resolved_at         timestamptz,
+  created_at          timestamptz default now(),
+  updated_at          timestamptz default now()
+);
+
+-- Auto-update updated_at
+create or replace function update_updated_at()
+returns trigger language plpgsql as $$
+begin
+  new.updated_at = now();
+  return new;
+end;
+$$;
+
+create trigger reports_updated_at
+  before update on reports
+  for each row execute function update_updated_at();
+
+-- ============================================================
+-- 5. REPORT MEDIA
+-- ============================================================
+
+create table report_media (
+  id          uuid primary key default uuid_generate_v4(),
+  report_id   uuid not null references reports(id) on delete cascade,
+  url         text not null,
+  -- type: 'image' | 'video'
+  type        text not null default 'image',
+  uploaded_at timestamptz default now()
+);
+
+-- ============================================================
+-- 6. REPORT STATUS HISTORY
+-- ============================================================
+
+create table report_status_history (
+  id          uuid primary key default uuid_generate_v4(),
+  report_id   uuid not null references reports(id) on delete cascade,
+  from_status text,
+  to_status   text not null,
+  -- changed_by: 'system' | 'authority' | 'admin'
+  changed_by  text not null default 'system',
+  note        text,
+  changed_at  timestamptz default now()
+);
+
+-- Auto-log status changes on reports
+create or replace function log_report_status_change()
+returns trigger language plpgsql as $$
+begin
+  if old.status is distinct from new.status then
+    insert into report_status_history (report_id, from_status, to_status, changed_by)
+    values (new.id, old.status, new.status, 'system');
+  end if;
+  return new;
+end;
+$$;
+
+create trigger reports_status_change
+  after update on reports
+  for each row execute function log_report_status_change();
+
+-- ============================================================
+-- 7. CHALLENGES
+-- ============================================================
+
+create table challenges (
+  id                uuid primary key default uuid_generate_v4(),
+  title             text not null,
+  description       text,
+  -- type: 'daily' | 'weekly' | 'community'
+  type              text not null default 'daily',
+  -- category: 'transport' | 'water' | 'waste' | 'community' | 'general'
+  category          text,
+  xp_reward         int  not null default 10,
+  target_count      int  not null default 1,
+  -- metric: 'trips' | 'reports' | 'actions' | 'participants'
+  metric            text not null default 'actions',
+  -- recurrence: 'once' | 'daily' | 'weekly'
+  recurrence        text not null default 'once',
+  participant_count int  not null default 0,
+  expires_at        timestamptz,
+  created_at        timestamptz default now()
+);
+
+create table user_challenges (
+  id            uuid primary key default uuid_generate_v4(),
+  user_id       uuid not null references public.profiles(id) on delete cascade,
+  challenge_id  uuid not null references challenges(id) on delete cascade,
+  progress      int  not null default 0,
+  -- status: 'in_progress' | 'completed' | 'expired'
+  status        text not null default 'in_progress',
+  completed_at  timestamptz,
+  created_at    timestamptz default now(),
+  unique (user_id, challenge_id)
+);
+
+-- ============================================================
+-- 8. BADGES
+-- ============================================================
+
+create table badges (
+  id                uuid primary key default uuid_generate_v4(),
+  name              text not null unique,
+  icon              text,
+  color             text,
+  description       text,
+  -- unlock_condition: human-readable rule e.g. 'Submit first report'
+  unlock_condition  text,
+  -- tier: 'bronze' | 'silver' | 'gold' | 'platinum'
+  tier              text not null default 'bronze',
+  created_at        timestamptz default now()
+);
+
+create table user_badges (
+  id         uuid primary key default uuid_generate_v4(),
+  user_id    uuid not null references public.profiles(id) on delete cascade,
+  badge_id   uuid not null references badges(id) on delete cascade,
+  earned_at  timestamptz default now(),
+  unique (user_id, badge_id)
+);
+
+-- ============================================================
+-- 9. REWARDS
+-- ============================================================
+
+create table rewards (
+  id                      uuid primary key default uuid_generate_v4(),
+  title                   text not null,
+  description             text,
+  partner                 text,
+  xp_cost                 int  not null default 100,
+  -- type: 'discount' | 'voucher' | 'recognition'
+  type                    text not null default 'voucher',
+  voucher_code_template   text,        -- e.g. 'CIVIC-{UUID6}'
+  valid_until             timestamptz,
+  active                  boolean not null default true,
+  created_at              timestamptz default now()
+);
+
+create table reward_redemptions (
+  id            uuid primary key default uuid_generate_v4(),
+  user_id       uuid not null references public.profiles(id) on delete cascade,
+  reward_id     uuid not null references rewards(id) on delete cascade,
+  voucher_code  text,
+  -- status: 'pending' | 'confirmed' | 'used' | 'expired'
+  status        text not null default 'pending',
+  redeemed_at   timestamptz default now()
+);
+
+-- ============================================================
+-- 10. LEADERBOARDS
+-- ============================================================
+
+create table leaderboards (
+  id            uuid primary key default uuid_generate_v4(),
+  -- scope: 'city' | 'college' | 'friends' | 'ward'
+  scope         text not null default 'city',
+  -- time_period: 'all_time' | 'weekly' | 'monthly'
+  time_period   text not null default 'all_time',
+  period_start  timestamptz,
+  period_end    timestamptz,
+  created_at    timestamptz default now()
+);
+
+create table leaderboard_entries (
+  id              uuid primary key default uuid_generate_v4(),
+  leaderboard_id  uuid not null references leaderboards(id) on delete cascade,
+  user_id         uuid not null references public.profiles(id) on delete cascade,
+  xp              int  not null default 0,
+  rank            int  not null,
+  rank_change     int  not null default 0,   -- positive = moved up, negative = dropped
+  title           text,                        -- snapshot of user title at that moment
+  updated_at      timestamptz default now(),
+  unique (leaderboard_id, user_id)
+);
+
+-- ============================================================
+-- 11. NEIGHBORHOOD IMPACT SCORE (view)
+-- ============================================================
+
+create or replace view neighborhood_impact as
+select
+  p.id                                    as user_id,
+  p.name,
+  p.xp_total,
+  p.level,
+  p.title,
+  p.streak_days,
+  count(r.id)                             as total_reports,
+  count(r.id) filter (where r.status = 'resolved') as resolved_reports,
+  -- impact score: weighted formula (tune as needed)
+  least(100,
+    (count(r.id) * 5) +
+    (count(r.id) filter (where r.status = 'resolved') * 10) +
+    (p.streak_days * 2) +
+    (p.xp_total / 50)
+  )::int                                  as impact_score
+from public.profiles p
+left join reports r on r.user_id = p.id
+group by p.id;
+
+-- ============================================================
+-- 12. INDEXES
+-- ============================================================
+
+create index on reports (user_id);
+create index on reports (status);
+create index on reports (ward_id);
+create index on reports (category_id);
+create index on reports (created_at desc);
+create index on report_status_history (report_id);
+create index on user_challenges (user_id);
+create index on user_badges (user_id);
+create index on leaderboard_entries (leaderboard_id, rank);
+create index on reward_redemptions (user_id);
+
+-- ============================================================
+-- 13. ROW LEVEL SECURITY (RLS)
+-- ============================================================
+
+alter table public.profiles          enable row level security;
+alter table reports                  enable row level security;
+alter table report_media             enable row level security;
+alter table report_status_history    enable row level security;
+alter table user_challenges          enable row level security;
+alter table user_badges              enable row level security;
+alter table reward_redemptions       enable row level security;
+alter table leaderboard_entries      enable row level security;
+
+-- profiles: users see/edit only their own row
+create policy "profiles: own read"   on public.profiles for select using (auth.uid() = id);
+create policy "profiles: own update" on public.profiles for update using (auth.uid() = id);
+
+-- reports: anyone authenticated can read; only owner can insert/update
+create policy "reports: read all"    on reports for select using (auth.role() = 'authenticated');
+create policy "reports: own insert"  on reports for insert with check (auth.uid() = user_id);
+create policy "reports: own update"  on reports for update using (auth.uid() = user_id);
+
+-- report_media: follow parent report ownership
+create policy "media: read all"      on report_media for select using (auth.role() = 'authenticated');
+create policy "media: own insert"    on report_media for insert with check (
+  exists (select 1 from reports where id = report_id and user_id = auth.uid())
+);
+
+-- status history: read-only for citizens
+create policy "status_history: read" on report_status_history for select using (auth.role() = 'authenticated');
+
+-- user_challenges: own rows only
+create policy "challenges: own"      on user_challenges for all using (auth.uid() = user_id);
+
+-- user_badges: read all, write via server only (service role)
+create policy "badges: read all"     on user_badges for select using (auth.role() = 'authenticated');
+
+-- reward_redemptions: own rows only
+create policy "redemptions: own"     on reward_redemptions for all using (auth.uid() = user_id);
+
+-- leaderboard_entries: read all
+create policy "leaderboard: read"    on leaderboard_entries for select using (auth.role() = 'authenticated');
+
+-- ============================================================
+-- 14. SEED DATA — Issue Categories & Subcategories
+-- ============================================================
+
+insert into issue_categories (name, icon, color, default_authority, base_xp) values
+  ('Solid Waste',              'trash',      '#E24B4A', 'BBMP Solid Waste Dept.',     15),
+  ('Water & Drainage',         'droplet',    '#378ADD', 'BWSSB / BBMP Drainage',      20),
+  ('Roads & Infrastructure',   'road',       '#BA7517', 'BBMP Roads Dept.',            15),
+  ('Street Lighting',          'zap',        '#EF9F27', 'BESCOM / BBMP Electricity',  10),
+  ('Parks & Public Spaces',    'leaf',       '#639922', 'BBMP Parks Dept.',            10),
+  ('Air & Noise Pollution',    'wind',       '#7F77DD', 'KSPCB / BBMP',               20),
+  ('Stray Animals & Pest',     'alert',      '#D4537E', 'BBMP Veterinary',             15),
+  ('Encroachment & Civic',     'shield',     '#888780', 'BBMP Revenue / BESCOM',       10);
+
+-- Solid Waste subcategories
+with cat as (select id from issue_categories where name = 'Solid Waste')
+insert into issue_subcategories (category_id, name, priority_default, priority_score) values
+  ((select id from cat), 'Illegal dumping / garbage dump',          'high',   90),
+  ((select id from cat), 'Overflowing public bin',                  'high',   85),
+  ((select id from cat), 'Medical / hazardous waste',               'high',   95),
+  ((select id from cat), 'Construction debris on road',             'medium', 60),
+  ((select id from cat), 'Bulk waste not collected',                'medium', 55),
+  ((select id from cat), 'Compost / segregation non-compliance',    'low',    30);
+
+-- Water & Drainage subcategories
+with cat as (select id from issue_categories where name = 'Water & Drainage')
+insert into issue_subcategories (category_id, name, priority_default, priority_score) values
+  ((select id from cat), 'Water pipe leak / burst main',            'high',   95),
+  ((select id from cat), 'Sewage overflow on road',                 'high',   92),
+  ((select id from cat), 'Contaminated water supply',               'high',   98),
+  ((select id from cat), 'Open manhole / drain cover missing',      'high',   90),
+  ((select id from cat), 'Borewell / tanker water shortage',        'high',   88),
+  ((select id from cat), 'Blocked stormwater drain',                'medium', 65),
+  ((select id from cat), 'Pothole in road (water-related)',         'medium', 60);
+
+-- Roads & Infrastructure subcategories
+with cat as (select id from issue_categories where name = 'Roads & Infrastructure')
+insert into issue_subcategories (category_id, name, priority_default, priority_score) values
+  ((select id from cat), 'Road cave-in / sinkhole',                 'high',   95),
+  ((select id from cat), 'Waterlogging / flooding',                 'high',   90),
+  ((select id from cat), 'Pothole (dry)',                           'high',   80),
+  ((select id from cat), 'Broken road divider / median',            'medium', 60),
+  ((select id from cat), 'Damaged footpath / sidewalk',             'medium', 50),
+  ((select id from cat), 'Encroachment on road',                    'medium', 55),
+  ((select id from cat), 'Speed breaker damage',                    'low',    30);
+
+-- Street Lighting subcategories
+with cat as (select id from issue_categories where name = 'Street Lighting')
+insert into issue_subcategories (category_id, name, priority_default, priority_score) values
+  ((select id from cat), 'Exposed / dangling wire',                 'high',   95),
+  ((select id from cat), 'Transformer fault',                       'high',   90),
+  ((select id from cat), 'Streetlight not working',                 'medium', 55),
+  ((select id from cat), 'No street lighting (new area)',           'medium', 50),
+  ((select id from cat), 'Streetlight flickering',                  'low',    30);
+
+-- Parks & Public Spaces subcategories
+with cat as (select id from issue_categories where name = 'Parks & Public Spaces')
+insert into issue_subcategories (category_id, name, priority_default, priority_score) values
+  ((select id from cat), 'Encroachment on park land',               'high',   85),
+  ((select id from cat), 'Damaged playground equipment',            'medium', 60),
+  ((select id from cat), 'Missing boundary wall / gate',            'medium', 50),
+  ((select id from cat), 'Broken bench / equipment',                'low',    30),
+  ((select id from cat), 'Overgrown / unkempt vegetation',          'low',    25),
+  ((select id from cat), 'Illegal vending / hawking in park',       'low',    35);
+
+-- Air & Noise Pollution subcategories
+with cat as (select id from issue_categories where name = 'Air & Noise Pollution')
+insert into issue_subcategories (category_id, name, priority_default, priority_score) values
+  ((select id from cat), 'Burning of waste / tyres',                'high',   90),
+  ((select id from cat), 'Industrial smoke / odour',                'high',   88),
+  ((select id from cat), 'Construction dust',                       'medium', 60),
+  ((select id from cat), 'Noise beyond permitted hours',            'medium', 55),
+  ((select id from cat), 'Generator exhaust near residences',       'low',    35),
+  ((select id from cat), 'Loudspeaker / event noise violation',     'low',    30);
+
+-- Stray Animals & Pest subcategories
+with cat as (select id from issue_categories where name = 'Stray Animals & Pest')
+insert into issue_subcategories (category_id, name, priority_default, priority_score) values
+  ((select id from cat), 'Carcass near water body',                 'high',   95),
+  ((select id from cat), 'Animal carcass on road',                  'high',   90),
+  ((select id from cat), 'Mosquito breeding site (stagnant water)', 'high',   85),
+  ((select id from cat), 'Rodent / mosquito infestation',           'medium', 60),
+  ((select id from cat), 'Stray dog / cattle menace',               'medium', 55);
+
+-- Encroachment & Civic subcategories
+with cat as (select id from issue_categories where name = 'Encroachment & Civic')
+insert into issue_subcategories (category_id, name, priority_default, priority_score) values
+  ((select id from cat), 'Tree fallen on road / wire',              'high',   92),
+  ((select id from cat), 'Uprooted tree (safety risk)',             'high',   90),
+  ((select id from cat), 'Illegal construction',                    'medium', 65),
+  ((select id from cat), 'Footpath encroachment by shops',          'medium', 50),
+  ((select id from cat), 'Unauthorized banner / flex board',        'low',    30),
+  ((select id from cat), 'Graffiti / vandalism on public property', 'low',    25);
+
+-- ============================================================
+-- 15. SEED DATA — Badges
+-- ============================================================
+
+insert into badges (name, icon, color, description, unlock_condition, tier) values
+  ('First Reporter',      'star',      '#EF9F27', 'Submitted your first report',              'reports_count >= 1',     'bronze'),
+  ('Eco Starter',         'leaf',      '#639922', 'Completed your first eco challenge',        'challenges_completed >= 1','bronze'),
+  ('Water Warrior',       'droplet',   '#378ADD', 'Reported 3 water issues',                  'water_reports >= 3',     'silver'),
+  ('Clean City Champ',    'building',  '#E24B4A', 'Had 10 reports resolved',                  'resolved_reports >= 10', 'gold'),
+  ('Guardian',            'shield',    '#7F77DD', 'Maintained a 7-day streak',                'streak_days >= 7',       'silver'),
+  ('Top Contributor',     'users',     '#D4537E', 'Ranked in top 10% of city',                'city_rank_percentile <= 10','gold'),
+  ('Influencer',          'trending',  '#BA7517', 'Reached 1,000 XP on Influencer path',      'path_xp >= 1000',        'gold'),
+  ('Visionary',           'eye',       '#888780', 'Submitted 25 reports',                     'reports_count >= 25',    'platinum'),
+  ('Streak Master',       'flame',     '#E8593C', 'Maintained a 30-day streak',               'streak_days >= 30',      'platinum');
+
+-- ============================================================
+-- 16. SEED DATA — Rewards
+-- ============================================================
+
+insert into rewards (title, description, partner, xp_cost, type, voucher_code_template, active) values
+  ('20% off BMTC Pass',       '20% discount on your next monthly BMTC bus pass', 'BMTC',              200, 'discount', 'CIVIC-BMTC-{UUID6}', true),
+  ('Café Coffee Day voucher', 'Free beverage at any CCD outlet',                 'Café Coffee Day',   300, 'voucher',  'CCD-CIVIC-{UUID6}',  true),
+  ('BigBasket ₹100 off',      '₹100 off on grocery orders above ₹500',           'BigBasket',         250, 'discount', 'BB-CIVIC-{UUID6}',   true),
+  ('Namma Metro 10% off',     '10% off on Namma Metro smart card recharge',      'Namma Metro',       150, 'discount', 'METRO-{UUID6}',      true),
+  ('Community Hero Badge',    'Special recognition on the city leaderboard',     'CivicPulse',        500, 'recognition', null,              true);
+
+-- ============================================================
+-- 17. SEED DATA — Bengaluru city + sample wards
+-- ============================================================
+
+insert into cities (name, state) values ('Bengaluru', 'Karnataka');
+
+with city as (select id from cities where name = 'Bengaluru')
+insert into wards (city_id, name, ward_number, zone) values
+  ((select id from city), 'Koramangala',  68, 'South'),
+  ((select id from city), 'Indiranagar',  81, 'East'),
+  ((select id from city), 'HSR Layout',   75, 'South'),
+  ((select id from city), 'Jayanagar',    58, 'South'),
+  ((select id from city), 'Whitefield',  149, 'East'),
+  ((select id from city), 'Malleshwaram', 28, 'West'),
+  ((select id from city), 'Hebbal',       5,  'North'),
+  ((select id from city), 'Electronic City', 196, 'South'),
+  ((select id from city), 'Cubbon Park',  78, 'Central'),
+  ((select id from city), 'MG Road',      79, 'Central');
+
+-- ============================================================
+-- 18. SEED DATA — Sample challenges
+-- ============================================================
+
+insert into challenges (title, description, type, category, xp_reward, target_count, metric, recurrence, expires_at) values
+  ('Ride public transport 3x',    'Track 3 trips using metro or bus this week',      'weekly',    'transport', 30,  3, 'trips',        'weekly',  now() + interval '7 days'),
+  ('Save water today',            'Log a water-saving action at home',               'daily',     'water',     20,  1, 'actions',      'daily',   now() + interval '1 day'),
+  ('Clean up HSR Layout',         'Join 142 citizens for a neighbourhood clean-up',  'community', 'waste',    100, 50, 'participants', 'once',    now() + interval '14 days'),
+  ('Report 3 issues this week',   'Submit 3 civic issue reports',                    'weekly',    'general',   40,  3, 'reports',      'weekly',  now() + interval '7 days'),
+  ('Zero waste weekend',          'Log waste-segregation action both days',          'weekly',    'waste',     25,  2, 'actions',      'weekly',  now() + interval '3 days');
+
+-- ============================================================
+-- Done! Tables, indexes, RLS policies, and seed data created.
+-- ============================================================

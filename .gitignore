@@ -1,0 +1,99 @@
+# ================================
+# Dependencies
+# ================================
+node_modules/
+.pnp
+.pnp.js
+
+# ================================
+# Environment Variables (SECRETS)
+# ================================
+.env
+.env.local
+.env.development
+.env.production
+.env.staging
+# Keep example files tracked
+!.env.example
+
+# ================================
+# Logs
+# ================================
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+logs/
+
+# ================================
+# Build Outputs
+# ================================
+dist/
+build/
+out/
+.next/
+.nuxt/
+
+# ================================
+# Expo / React Native
+# ================================
+.expo/
+.expo-shared/
+expo-env.d.ts
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+*.orig.*
+web-build/
+android/
+ios/
+
+# ================================
+# Metro bundler
+# ================================
+.metro-health-check*
+
+# ================================
+# TypeScript
+# ================================
+*.tsbuildinfo
+
+# ================================
+# Testing
+# ================================
+coverage/
+.nyc_output/
+
+# ================================
+# OS Files
+# ================================
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# ================================
+# Editor / IDE
+# ================================
+.vscode/settings.json
+.vscode/launch.json
+.vscode/tasks.json
+.vscode/*.code-snippets
+.idea/
+*.swp
+*.swo
+*~
+
+# ================================
+# Misc
+# ================================
+.cache/
+.parcel-cache/
+*.pem
