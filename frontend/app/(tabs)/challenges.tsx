@@ -1,8 +1,6 @@
-import React, { useCallback, useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
-  ActivityIndicator,
-  Alert,
-  RefreshControl,
+  FlatList,
   SafeAreaView,
   ScrollView,
   StyleSheet,
@@ -10,197 +8,462 @@ import {
   TouchableOpacity,
   View,
 } from 'react-native';
-import { ChallengesAPI, type Challenge, type UserChallenge } from '@/lib/api';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+import initialChallengesData from '@/lib/challenges';
 
-const FILTERS: { label: string; value?: string }[] = [
-  { label: 'All' },
-  { label: 'Daily', value: 'daily' },
-  { label: 'Weekly', value: 'weekly' },
-  { label: 'Community', value: 'community' },
-];
+type ChallengeStatus = 'not_started' | 'in_progress' | 'completed';
+
+interface ChallengeState {
+  id: string;
+  type: string;
+  icon: string;
+  title: string;
+  desc: string;
+  xp: number;
+  status: ChallengeStatus;
+  progress: number;
+  total: number;
+  joined?: number;
+}
+
+const STORAGE_KEY = 'challenges-screen-state-v1';
+const FILTERS = ['All', 'Daily', 'Weekly', 'Monthly', 'Community'];
+const TYPE_COLORS: Record<string, string> = {
+  daily: '#dcfce7',
+  weekly: '#dbeafe',
+  monthly: '#fef3c7',
+  community: '#ede9fe',
+};
 
 export default function ChallengesScreen() {
-  const [filter, setFilter] = useState<string | undefined>(undefined);
-  const [challenges, setChallenges] = useState<Challenge[]>([]);
-  const [mine, setMine] = useState<UserChallenge[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [refreshing, setRefreshing] = useState(false);
-  const [busyId, setBusyId] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [activeFilter, setActiveFilter] = useState('All');
+  const [challengeList, setChallengeList] = useState<ChallengeState[]>(initialChallengesData as ChallengeState[]);
+  const [totalXP, setTotalXP] = useState(0);
 
-  const load = useCallback(async (showSpinner = false) => {
-    try {
-      if (showSpinner) setLoading(true);
-      setError(null);
-      const [listRes, mineRes] = await Promise.allSettled([
-        ChallengesAPI.list(filter),
-        ChallengesAPI.mine(),
-      ]);
+  useEffect(() => {
+    let isMounted = true;
 
-      if (listRes.status === 'fulfilled') setChallenges(listRes.value.challenges);
-      if (mineRes.status === 'fulfilled') setMine(mineRes.value.challenges);
-    } catch (err) {
-      console.error('[CHALLENGES ERROR]', err);
-      setError(err instanceof Error ? err.message : 'Failed to load challenges');
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [filter]);
+    AsyncStorage.getItem(STORAGE_KEY)
+      .then((raw) => {
+        if (!raw || !isMounted) return;
 
-  // Initial load — show spinner
-  useEffect(() => { load(true); }, [load]);
+        try {
+          const parsed = JSON.parse(raw);
+          if (parsed && Array.isArray(parsed.challenges)) {
+            const restoredById = new Map<string, ChallengeState>(
+              parsed.challenges.map((item: ChallengeState) => [item.id, item])
+            );
+            setChallengeList((current) => current.map((item) => restoredById.get(item.id) ?? item));
+          }
+          if (typeof parsed?.totalXP === 'number') {
+            setTotalXP(parsed.totalXP);
+          }
+        } catch (error) {
+          console.warn('Failed to restore challenges state', error);
+        }
+      })
+      .catch((error) => {
+        console.warn('Failed to read saved challenges state', error);
+      });
 
-  const myByChallengeId = useMemo(() => {
-    const map = new Map<string, UserChallenge>();
-    for (const item of mine) {
-      map.set(item.challenges.id, item);
-    }
-    return map;
-  }, [mine]);
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
-  const onRefresh = () => {
-    setRefreshing(true);
-    load();
-  };
+  useEffect(() => {
+    AsyncStorage.setItem(STORAGE_KEY, JSON.stringify({ totalXP, challenges: challengeList }))
+      .catch((error) => {
+        console.warn('Failed to persist challenges state', error);
+      });
+  }, [challengeList, totalXP]);
 
-  const handleJoin = async (challengeId: string) => {
-    try {
-      setBusyId(challengeId);
-      await ChallengesAPI.join(challengeId);
-      await load();
-    } catch (err) {
-      Alert.alert('Join failed', err instanceof Error ? err.message : 'Could not join challenge');
-    } finally {
-      setBusyId(null);
-    }
-  };
+  const filteredChallenges = useMemo(() => {
+    if (activeFilter === 'All') return challengeList;
+    return challengeList.filter((challenge) => challenge.type === activeFilter.toLowerCase());
+  }, [activeFilter, challengeList]);
 
-  const handleProgress = async (challengeId: string) => {
-    try {
-      setBusyId(challengeId);
-      const result = await ChallengesAPI.progress(challengeId, 1);
-      if (result.completed) {
-        Alert.alert('Challenge completed', `+${result.xp_awarded} XP awarded`);
-      }
-      await load();
-    } catch (err) {
-      Alert.alert('Update failed', err instanceof Error ? err.message : 'Could not update progress');
-    } finally {
-      setBusyId(null);
-    }
-  };
-
-  if (loading) {
-    return (
-      <SafeAreaView style={styles.centered}>
-        <ActivityIndicator size="large" color="#1a7a4a" />
-      </SafeAreaView>
+  const handleStart = (id: string) => {
+    setChallengeList((current) =>
+      current.map((challenge) =>
+        challenge.id === id ? { ...challenge, status: 'in_progress', progress: 0 } : challenge
+      )
     );
-  }
+  };
+
+  const handleProgress = (id: string) => {
+    setChallengeList((current) =>
+      current.map((challenge) => {
+        if (challenge.id !== id) return challenge;
+        if (challenge.status !== 'in_progress') return challenge;
+
+        const nextProgress = challenge.progress + 1;
+        if (nextProgress >= challenge.total) {
+          setTotalXP((currentXP) => currentXP + challenge.xp);
+          return {
+            ...challenge,
+            progress: nextProgress,
+            status: 'completed',
+          };
+        }
+
+        return {
+          ...challenge,
+          progress: nextProgress,
+        };
+      })
+    );
+  };
+
+  const renderChallenge = ({ item }: { item: ChallengeState }) => {
+    const progressPercent = Math.min(100, Math.round((item.progress / item.total) * 100));
+    const inProgress = item.status === 'in_progress';
+    const completed = item.status === 'completed';
+
+    return (
+      <TouchableOpacity
+        activeOpacity={inProgress ? 0.9 : 1}
+        onPress={() => {
+          if (inProgress) handleProgress(item.id);
+        }}
+        style={[
+          styles.card,
+          item.type === 'community' && styles.communityCard,
+        ]}
+      >
+        <View style={styles.cardHeaderRow}>
+          <View style={[styles.iconBubble, { backgroundColor: TYPE_COLORS[item.type] ?? '#dcfce7' }]}>
+            <Text style={styles.iconText}>{item.icon}</Text>
+          </View>
+
+          <View style={styles.statusBadgeWrap}>
+            {completed ? (
+              <View style={[styles.statusBadge, styles.completedBadge]}>
+                <Text style={styles.completedBadgeText}>✅ COMPLETED</Text>
+              </View>
+            ) : item.type === 'community' ? (
+              <View style={styles.joinedBadge}>
+                <Text style={styles.joinedBadgeText}>👥 {item.joined ?? 0} JOINED</Text>
+              </View>
+            ) : inProgress ? (
+              <View style={styles.inProgressBadge}>
+                <Text style={styles.inProgressBadgeText}>IN PROGRESS</Text>
+              </View>
+            ) : null}
+          </View>
+
+          <View style={[styles.xpBadge, inProgress || completed ? styles.xpBadgeActive : styles.xpBadgeInactive]}>
+            <Text style={[styles.xpBadgeText, inProgress || completed ? styles.xpBadgeTextActive : styles.xpBadgeTextInactive]}>
+              +{item.xp} XP
+            </Text>
+          </View>
+        </View>
+
+        <Text style={styles.cardTitle}>{item.title}</Text>
+        <Text style={styles.cardDescription}>{item.desc}</Text>
+
+        {completed ? null : inProgress ? (
+          <View style={styles.progressSection}>
+            <View style={styles.progressHeaderRow}>
+              <Text style={styles.progressLabel}>PROGRESS</Text>
+              <Text style={styles.progressCounter}>{item.progress}/{item.total} TRIPS</Text>
+            </View>
+            <View style={styles.progressTrack}>
+              <View style={[styles.progressFill, { width: `${progressPercent}%` }]} />
+            </View>
+          </View>
+        ) : (
+          <TouchableOpacity
+            style={styles.startButton}
+            onPress={() => handleStart(item.id)}
+          >
+            <Text style={styles.startButtonText}>Start Challenge</Text>
+          </TouchableOpacity>
+        )}
+      </TouchableOpacity>
+    );
+  };
 
   return (
     <SafeAreaView style={styles.safeArea}>
-      <ScrollView
-        contentContainerStyle={styles.content}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-      >
+      <View style={styles.headerSection}>
         <Text style={styles.pageTitle}>Challenges</Text>
 
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={styles.filters}>
-          {FILTERS.map((item) => {
-            const active = item.value === filter || (!item.value && !filter);
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.filterRow}
+        >
+          {FILTERS.map((filter) => {
+            const active = filter === activeFilter;
             return (
               <TouchableOpacity
-                key={item.label}
-                style={[styles.filterChip, active && styles.filterChipActive]}
-                onPress={() => setFilter(item.value)}
+                key={filter}
+                style={[styles.filterPill, active ? styles.filterPillActive : styles.filterPillInactive]}
+                onPress={() => setActiveFilter(filter)}
               >
-                <Text style={[styles.filterText, active && styles.filterTextActive]}>{item.label}</Text>
+                <Text style={[styles.filterPillText, active ? styles.filterPillTextActive : styles.filterPillTextInactive]}>
+                  {filter}
+                </Text>
               </TouchableOpacity>
             );
           })}
         </ScrollView>
 
-        {error ? <Text style={styles.errorText}>{error}</Text> : null}
+        <View style={styles.xpBanner}>
+          <Text style={styles.xpBannerText}>⚡ Total XP: {totalXP}</Text>
+        </View>
+      </View>
 
-        {challenges.length === 0 ? (
-          <Text style={styles.emptyText}>No challenges available.</Text>
-        ) : (
-          challenges.map((challenge) => {
-            const joined = myByChallengeId.get(challenge.id);
-            const progress = joined?.progress ?? 0;
-            const total = challenge.target_count || 1;
-            const percent = Math.min(100, Math.round((progress / total) * 100));
-            const completed = joined?.status === 'completed';
-
-            return (
-              <View key={challenge.id} style={styles.card}>
-                <View style={styles.cardTop}>
-                  <Text style={styles.cardType}>{challenge.type.toUpperCase()}</Text>
-                  <Text style={styles.cardXp}>+{challenge.xp_reward} XP</Text>
-                </View>
-
-                <Text style={styles.cardTitle}>{challenge.title}</Text>
-                <Text style={styles.cardSub}>{challenge.description || 'No description'}</Text>
-
-                <View style={styles.progressTrack}>
-                  <View style={[styles.progressFill, { width: `${percent}%` }]} />
-                </View>
-                <Text style={styles.progressText}>{progress}/{total} {challenge.metric}</Text>
-
-                {!joined ? (
-                  <TouchableOpacity
-                    style={[styles.actionBtn, busyId === challenge.id && styles.actionBtnDisabled]}
-                    disabled={busyId === challenge.id}
-                    onPress={() => handleJoin(challenge.id)}
-                  >
-                    <Text style={styles.actionText}>{busyId === challenge.id ? 'Joining...' : 'Join challenge'}</Text>
-                  </TouchableOpacity>
-                ) : (
-                  <TouchableOpacity
-                    style={[styles.actionBtn, completed && styles.doneBtn, busyId === challenge.id && styles.actionBtnDisabled]}
-                    disabled={busyId === challenge.id || completed}
-                    onPress={() => handleProgress(challenge.id)}
-                  >
-                    <Text style={styles.actionText}>
-                      {completed ? 'Completed' : busyId === challenge.id ? 'Updating...' : 'Add progress +1'}
-                    </Text>
-                  </TouchableOpacity>
-                )}
-              </View>
-            );
-          })
-        )}
-      </ScrollView>
+      <FlatList
+        data={filteredChallenges}
+        keyExtractor={(item) => item.id}
+        renderItem={renderChallenge}
+        contentContainerStyle={styles.listContent}
+        showsVerticalScrollIndicator={false}
+        ListEmptyComponent={
+          <View style={styles.emptyState}>
+            <Text style={styles.emptyTitle}>No challenges here yet.</Text>
+            <Text style={styles.emptyText}>Switch tabs to see more opportunities.</Text>
+          </View>
+        }
+      />
     </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: { flex: 1, backgroundColor: '#f5f7f6' },
-  centered: { flex: 1, alignItems: 'center', justifyContent: 'center', backgroundColor: '#fff' },
-  content: { padding: 16, paddingBottom: 32 },
-  pageTitle: { fontSize: 28, fontWeight: '800', color: '#1a7a4a', marginBottom: 14 },
-  filters: { gap: 8, marginBottom: 14 },
-  filterChip: { paddingHorizontal: 14, paddingVertical: 8, borderRadius: 999, backgroundColor: '#d5eadf' },
-  filterChipActive: { backgroundColor: '#1a7a4a' },
-  filterText: { color: '#1a7a4a', fontWeight: '700' },
-  filterTextActive: { color: '#fff' },
-  card: { backgroundColor: '#fff', borderRadius: 14, padding: 14, marginBottom: 12 },
-  cardTop: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 6 },
-  cardType: { color: '#6b7280', fontWeight: '700', fontSize: 11 },
-  cardXp: { color: '#1a7a4a', fontWeight: '700', fontSize: 12 },
-  cardTitle: { fontSize: 16, fontWeight: '700', color: '#111827' },
-  cardSub: { marginTop: 4, marginBottom: 10, color: '#6b7280' },
-  progressTrack: { backgroundColor: '#e5e7eb', height: 8, borderRadius: 6, overflow: 'hidden' },
-  progressFill: { height: '100%', backgroundColor: '#1a7a4a' },
-  progressText: { marginTop: 6, fontSize: 12, color: '#6b7280' },
-  actionBtn: { marginTop: 12, borderRadius: 10, backgroundColor: '#1a7a4a', paddingVertical: 10, alignItems: 'center' },
-  doneBtn: { backgroundColor: '#6b7280' },
-  actionBtnDisabled: { opacity: 0.7 },
-  actionText: { color: '#fff', fontWeight: '700' },
-  errorText: { color: '#b91c1c', marginBottom: 8 },
-  emptyText: { color: '#6b7280' },
+  safeArea: {
+    flex: 1,
+    backgroundColor: '#f0f7f0',
+  },
+  headerSection: {
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 10,
+    backgroundColor: '#f0f7f0',
+  },
+  pageTitle: {
+    fontSize: 30,
+    fontWeight: '800',
+    color: '#1f5f2f',
+    marginBottom: 12,
+  },
+  filterRow: {
+    gap: 10,
+    paddingRight: 16,
+  },
+  filterPill: {
+    paddingHorizontal: 14,
+    paddingVertical: 9,
+    borderRadius: 999,
+    borderWidth: 1.5,
+    marginRight: 10,
+  },
+  filterPillActive: {
+    backgroundColor: '#2e7d32',
+    borderColor: '#2e7d32',
+  },
+  filterPillInactive: {
+    backgroundColor: '#fff',
+    borderColor: '#2e7d32',
+  },
+  filterPillText: {
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  filterPillTextActive: {
+    color: '#fff',
+  },
+  filterPillTextInactive: {
+    color: '#2e7d32',
+  },
+  xpBanner: {
+    marginTop: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    backgroundColor: '#fff',
+    borderWidth: 1,
+    borderColor: '#bfe0c3',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 4,
+    elevation: 2,
+  },
+  xpBannerText: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#2e7d32',
+  },
+  listContent: {
+    paddingHorizontal: 16,
+    paddingTop: 10,
+    paddingBottom: 26,
+  },
+  card: {
+    backgroundColor: '#fff',
+    borderRadius: 16,
+    padding: 14,
+    marginBottom: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  communityCard: {
+    borderLeftWidth: 4,
+    borderLeftColor: '#7c3aed',
+  },
+  cardHeaderRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  iconBubble: {
+    width: 34,
+    height: 34,
+    borderRadius: 17,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  iconText: {
+    fontSize: 16,
+  },
+  statusBadgeWrap: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginHorizontal: 10,
+  },
+  statusBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+  },
+  inProgressBadge: {
+    backgroundColor: '#2e7d32',
+  },
+  joinedBadge: {
+    backgroundColor: '#e5e7eb',
+  },
+  completedBadge: {
+    backgroundColor: '#2e7d32',
+  },
+  inProgressBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  joinedBadgeText: {
+    color: '#4b5563',
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  completedBadgeText: {
+    color: '#fff',
+    fontSize: 10,
+    fontWeight: '800',
+    textTransform: 'uppercase',
+  },
+  xpBadge: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderWidth: 1.2,
+  },
+  xpBadgeActive: {
+    borderColor: '#2e7d32',
+    backgroundColor: '#fff',
+  },
+  xpBadgeInactive: {
+    borderColor: '#f59e0b',
+    backgroundColor: '#fff',
+  },
+  xpBadgeText: {
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  xpBadgeTextActive: {
+    color: '#2e7d32',
+  },
+  xpBadgeTextInactive: {
+    color: '#f59e0b',
+  },
+  cardTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#1f2937',
+    marginBottom: 4,
+  },
+  cardDescription: {
+    fontSize: 14,
+    color: '#666',
+    lineHeight: 20,
+    marginBottom: 12,
+  },
+  progressSection: {
+    marginTop: 4,
+  },
+  progressHeaderRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  progressLabel: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#2e7d32',
+    textTransform: 'uppercase',
+    letterSpacing: 0.4,
+  },
+  progressCounter: {
+    fontSize: 12,
+    fontWeight: '700',
+    color: '#4b5563',
+  },
+  progressTrack: {
+    height: 10,
+    borderRadius: 999,
+    backgroundColor: '#d1e6d5',
+    overflow: 'hidden',
+  },
+  progressFill: {
+    height: '100%',
+    borderRadius: 999,
+    backgroundColor: '#2e7d32',
+  },
+  startButton: {
+    marginTop: 12,
+    borderRadius: 12,
+    borderWidth: 1.5,
+    borderColor: '#2e7d32',
+    paddingVertical: 12,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  startButtonText: {
+    color: '#2e7d32',
+    fontSize: 13,
+    fontWeight: '800',
+  },
+  emptyState: {
+    paddingVertical: 32,
+    alignItems: 'center',
+  },
+  emptyTitle: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#1f2937',
+    marginBottom: 6,
+  },
+  emptyText: {
+    fontSize: 13,
+    color: '#6b7280',
+  },
 });

@@ -71,7 +71,7 @@ function statusStyle(status: string) {
 }
 
 export default function ProfileScreen() {
-  const { profile: authProfile, localAvatarUri, setLocalAvatarUri, signOut } = useAuth();
+  const { profile: authProfile, user, localAvatarUri, setLocalAvatarUri, signOut } = useAuth();
   const [profile, setProfile] = useState<Profile | null>(null);
   const [impact, setImpact] = useState<NeighborhoodImpact | null>(null);
   const [badges, setBadges] = useState<UserBadge[]>([]);
@@ -80,6 +80,11 @@ export default function ProfileScreen() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const fallbackName = user?.user_metadata?.full_name
+    ?? user?.user_metadata?.name
+    ?? user?.email?.split('@')[0]
+    ?? 'Citizen';
 
   const loadData = useCallback(async () => {
     try {
@@ -117,7 +122,24 @@ export default function ProfileScreen() {
     loadData();
   }, [loadData]);
 
-  const data = profile ?? authProfile;
+  const fallbackProfile = useMemo<Profile>(() => ({
+    id: user?.id ?? 'local-user',
+    name: fallbackName,
+    phone: null,
+    xp_total: 0,
+    level: 1,
+    role: 'citizen',
+    title: 'Activist',
+    streak_days: 0,
+    last_active: new Date().toISOString(),
+    avatar_url: null,
+    created_at: new Date().toISOString(),
+  }), [fallbackName, user?.id]);
+
+  const data = profile ?? authProfile ?? fallbackProfile;
+  const userEmail = user?.email ?? 'Email unavailable';
+  const userCity = data?.wards?.cities?.name ?? 'City';
+  const totalXp = data?.xp_total ?? 0;
 
   // XP progress toward next level
   const { xpCurrent, xpNext, progressPercent, progressLabel } = useMemo(() => {
@@ -138,9 +160,16 @@ export default function ProfileScreen() {
   }, [data]);
 
   const initials = useMemo(() => {
-    if (!data?.name) return 'N';
-    return data.name.split(' ').map((n) => n[0]).join('').toUpperCase().slice(0, 2);
-  }, [data]);
+    const name = data?.name ?? fallbackName;
+    if (!name) return 'N';
+
+    const parts = name.trim().split(/\s+/).filter(Boolean);
+    if (parts.length >= 2) {
+      return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+    }
+
+    return parts[0].slice(0, 2).toUpperCase();
+  }, [data, fallbackName]);
 
   const pickProfileImage = async () => {
     const result = await ImagePicker.launchImageLibraryAsync({
@@ -222,10 +251,11 @@ export default function ProfileScreen() {
             </View>
           </TouchableOpacity>
 
-          <Text style={s.name}>{data?.name ?? 'Citizen'}</Text>
+          <Text style={s.name}>{data?.name ?? fallbackName}</Text>
+          <Text style={s.emailText}>{userEmail}</Text>
           <View style={s.subtitleRow}>
             <Text style={s.pin}>📍</Text>
-            <Text style={s.subtitleCity}>{data?.wards?.cities?.name ?? 'City'}</Text>
+            <Text style={s.subtitleCity}>{userCity}</Text>
             <Text style={s.dot}> • </Text>
             <Text style={s.subtitleTitle}>{data?.title ?? 'Activist'}</Text>
           </View>
@@ -439,6 +469,7 @@ const s = StyleSheet.create({
   },
   levelBadgeText: { color: WHITE, fontSize: 11, fontWeight: '800' },
   name: { fontSize: 24, fontWeight: '800', color: '#1F2937', marginTop: 14 },
+  emailText: { fontSize: 12, color: '#6B7280', marginTop: 6, fontWeight: '600' },
   subtitleRow: { flexDirection: 'row', alignItems: 'center', marginTop: 4 },
   pin: { fontSize: 13 },
   subtitleCity: { fontSize: 14, color: '#4B5563', fontWeight: '600' },

@@ -1,8 +1,10 @@
-import React, { useCallback, useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
   ActivityIndicator,
   Alert,
+  Animated,
   FlatList,
+  Image,
   Modal,
   RefreshControl,
   SafeAreaView,
@@ -18,12 +20,22 @@ import {
 import { ChevronDown, X, Camera, MapPin, Image as ImageIcon } from 'lucide-react-native';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
+import { useRouter } from 'expo-router';
 import { CategoriesAPI, LocationsAPI, ReportsAPI, type Category, type Ward } from '@/lib/api';
 
 import { useAuth } from '@/context/AuthContext';
 
+const MUNICIPAL_CATEGORY_OPTIONS: Category[] = [
+  { id: 'pothole', name: 'Pothole', icon: null, color: null, default_authority: null, base_xp: 10 },
+  { id: 'streetlight-fault', name: 'Streetlight Fault', icon: null, color: null, default_authority: null, base_xp: 10 },
+  { id: 'garbage-dumping', name: 'Garbage Dumping', icon: null, color: null, default_authority: null, base_xp: 10 },
+  { id: 'sewage-overflow', name: 'Sewage Overflow', icon: null, color: null, default_authority: null, base_xp: 10 },
+  { id: 'water-leakage', name: 'Water Leakage', icon: null, color: null, default_authority: null, base_xp: 10 },
+];
+
 export default function ReportScreen() {
-  const { refreshProfile } = useAuth();
+  const { refreshProfile, session, loading: authLoading } = useAuth();
+  const router = useRouter();
   const [title, setTitle] = useState('');
   const [description, setDescription] = useState('');
   const [categories, setCategories] = useState<Category[]>([]);
@@ -33,13 +45,26 @@ export default function ReportScreen() {
   const [loading, setLoading] = useState(true);
   const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
-  
-  const [imageUri, setImageUri] = useState<string | null>(null);
+  const [image, setImage] = useState<{ uri: string; base64: string; mimeType: string } | null>(null);
+  const [location, setLocation] = useState('Detecting location…');
+  const [aiResult, setAiResult] = useState<null | {
+    category: string;
+    severity: 'Low' | 'Medium' | 'High';
+    confidence: number;
+    authority: string;
+    description: string;
+  }>(null);
+  const [classifying, setClassifying] = useState(false);
+  const [showAiCard, setShowAiCard] = useState(false);
+  const [customLocation, setCustomLocation] = useState('');
 
   // Dropdown states
   const [categoryModal, setCategoryModal] = useState(false);
   const [wardModal, setWardModal] = useState(false);
+  const [locationModal, setLocationModal] = useState(false);
   const [detectingLocation, setDetectingLocation] = useState(false);
+  const fadeAnim = useRef(new Animated.Value(0)).current;
+  const submitApiBaseUrl = process.env.EXPO_PUBLIC_API_BASE_URL?.trim() || 'http://192.168.1.3:3001/api/v1';
 
   const loadMetadata = useCallback(async () => {
     try {
@@ -47,12 +72,18 @@ export default function ReportScreen() {
         CategoriesAPI.list(),
         LocationsAPI.wards(),
       ]);
-      setCategories(cats.categories);
-      setWards(wardRes.wards);
+      const categoryList = Array.isArray(cats.categories) ? cats.categories : [];
+      const wardList = Array.isArray(wardRes.wards) ? wardRes.wards : [];
+      const resolvedCategories = categoryList.length > 0 ? categoryList : MUNICIPAL_CATEGORY_OPTIONS;
+
+      setCategories(resolvedCategories);
+      setWards(wardList);
       
-      if (cats.categories.length > 0) setSelectedCategory(prev => prev || cats.categories[0]);
-      if (wardRes.wards.length > 0) setSelectedWard(prev => prev || wardRes.wards[0]);
+      if (resolvedCategories.length > 0) setSelectedCategory(prev => prev || resolvedCategories[0]);
+      if (wardList.length > 0) setSelectedWard(prev => prev || wardList[0]);
     } catch (err) {
+      setCategories(MUNICIPAL_CATEGORY_OPTIONS);
+      setSelectedCategory(prev => prev || MUNICIPAL_CATEGORY_OPTIONS[0]);
       Alert.alert('Load failed', err instanceof Error ? err.message : 'Could not load metadata');
     } finally {
       setLoading(false);
@@ -60,138 +91,238 @@ export default function ReportScreen() {
     }
   }, []);
 
-  useEffect(() => {
-    loadMetadata();
-  }, [loadMetadata]);
+  const classifyImage = useCallback(async (selectedImage: { uri: string; base64: string; mimeType: string }) => {
+    if (!selectedImage.base64) {
+      Alert.alert('Image Error', 'The image could not be processed.');
+      return;
+    }
+
+    try {
+      setClassifying(true);
+      setAiResult(null);
+      setShowAiCard(false);
+      fadeAnim.setValue(0);
+      const payload = await ReportsAPI.classifyImage({
+        imageBase64: selectedImage.base64,
+        mimeType: selectedImage.mimeType,
+      });
+
+      const parsed = payload.classification as {
+        category: string;
+        severity: 'Low' | 'Medium' | 'High';
+        confidence: number;
+        authority: string;
+        description: string;
+      };
+
+      setAiResult(parsed);
+      const matchedCategory = categories.find((category) => category.name.toLowerCase() === parsed.category.toLowerCase());
+      if (matchedCategory) {
+        setSelectedCategory(matchedCategory);
+      }
+
+      setShowAiCard(true);
+      Animated.spring(fadeAnim, {
+        toValue: 1,
+        tension: 80,
+        friction: 8,
+        useNativeDriver: true,
+      }).start();
+    } catch (err) {
+      Alert.alert('Classification failed', err instanceof Error ? err.message : 'Could not classify the image');
+    } finally {
+      setClassifying(false);
+    }
+  }, [categories, fadeAnim]);
+
+  const handleImageSelection = useCallback(async (source: 'camera' | 'gallery') => {
+    try {
+      if (source === 'camera') {
+        const cameraPermission = await ImagePicker.requestCameraPermissionsAsync();
+        if (!cameraPermission.granted) {
+          Alert.alert('Permission Denied', 'Camera access is required to take photos.');
+          return;
+        }
+
+        const result = await ImagePicker.launchCameraAsync({
+          base64: true,
+          quality: 0.7,
+        });
+
+        if (result.canceled || !result.assets?.[0]) return;
+
+        const asset = result.assets[0];
+        const nextImage = {
+          uri: asset.uri,
+          base64: asset.base64 || '',
+          mimeType: asset.mimeType || 'image/jpeg',
+        };
+
+        setImage(nextImage);
+        setAiResult(null);
+        setShowAiCard(false);
+        fadeAnim.setValue(0);
+        await classifyImage(nextImage);
+        return;
+      }
+
+      const libraryPermission = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!libraryPermission.granted) {
+        Alert.alert('Permission Denied', 'Photo library access is required to upload images.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        base64: true,
+        quality: 0.7,
+      });
+
+      if (result.canceled || !result.assets?.[0]) return;
+
+      const asset = result.assets[0];
+      const nextImage = {
+        uri: asset.uri,
+        base64: asset.base64 || '',
+        mimeType: asset.mimeType || 'image/jpeg',
+      };
+
+      setImage(nextImage);
+      setAiResult(null);
+      setShowAiCard(false);
+      fadeAnim.setValue(0);
+      await classifyImage(nextImage);
+    } catch (err) {
+      Alert.alert('Image Error', err instanceof Error ? err.message : 'Could not process the selected image');
+    }
+  }, [classifyImage, fadeAnim]);
 
   const pickImage = async () => {
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images'],
-      allowsEditing: true,
-      quality: 0.8,
-    });
-    if (!result.canceled && result.assets && result.assets.length > 0) {
-      setImageUri(result.assets[0].uri);
-    }
+    await handleImageSelection('gallery');
   };
 
   const takePhoto = async () => {
-    const perm = await ImagePicker.requestCameraPermissionsAsync();
-    if (!perm.granted) {
-      Alert.alert('Permission Denied', 'Camera access is required to take photos.');
-      return;
-    }
-    const result = await ImagePicker.launchCameraAsync({
-      mediaTypes: ['images'],
-      allowsEditing: true,
-      quality: 0.8,
-    });
-    if (!result.canceled && result.assets && result.assets.length > 0) {
-      setImageUri(result.assets[0].uri);
-    }
+    await handleImageSelection('camera');
   };
 
-  const detectLocation = async () => {
+  const detectCurrentLocation = useCallback(async () => {
     try {
       setDetectingLocation(true);
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status !== 'granted') {
-        Alert.alert('Permission Denied', 'Location permission is needed to auto-detect your ward.');
+        Alert.alert('Permission Denied', 'Location permission is needed to detect your ward.');
         return;
       }
 
       const loc = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
-      const geocode = await Location.reverseGeocodeAsync({ 
-        latitude: loc.coords.latitude, 
-        longitude: loc.coords.longitude 
+      const geocode = await Location.reverseGeocodeAsync({
+        latitude: loc.coords.latitude,
+        longitude: loc.coords.longitude,
       });
 
       if (geocode.length > 0) {
-        const p = geocode[0];
-        const searchTerms = [p.district, p.subregion, p.street, p.name].filter(Boolean) as string[];
-        
-        // Attempt to find a matching ward
-        const match = wards.find(w => 
-          searchTerms.some(term => 
-            w.name.toLowerCase().includes(term.toLowerCase()) || 
-            term.toLowerCase().includes(w.name.toLowerCase())
-          )
-        );
+        const place = geocode[0];
+        const detectedAddress = [place.name, place.street, place.subregion, place.city, place.region]
+          .filter(Boolean)
+          .slice(0, 4)
+          .join(', ');
 
-        if (match) {
-          setSelectedWard(match);
-          Alert.alert('Location Detected', `Detected: ${p.district || p.subregion || 'Your area'}\nAuto-selected: ${match.name}`);
-        } else {
-          Alert.alert('Location Detected', `You are near ${p.district || p.subregion || 'this location'}, but we couldn't find a precisely matching ward. Please select it manually.`);
-        }
+        setLocation(detectedAddress || 'Location detected');
+      } else {
+        setLocation('Location detected');
       }
     } catch (err) {
       Alert.alert('Detection failed', 'Could not determine your location. Please select your ward manually.');
     } finally {
       setDetectingLocation(false);
     }
+  }, []);
+
+  useEffect(() => {
+    if (authLoading) return;
+
+    if (session) {
+      loadMetadata();
+    } else {
+      setLoading(false);
+    }
+
+    detectCurrentLocation();
+  }, [authLoading, detectCurrentLocation, loadMetadata, session]);
+
+  const applyCustomLocation = () => {
+    if (customLocation.trim()) {
+      setLocation(customLocation.trim());
+      setLocationModal(false);
+      return;
+    }
+
+    Alert.alert('Location required', 'Enter a custom location or choose a ward.');
   };
 
   const submit = async () => {
-    if (!description.trim()) {
-      Alert.alert('Missing details', 'Please add a description before submitting.');
+    if (!image) {
+      Alert.alert('Image required', 'Please capture or upload a photo before submitting.');
+      return;
+    }
+
+    if (!selectedCategory) {
+      Alert.alert('Category required', 'Please select a category for this issue.');
+      return;
+    }
+
+    if (!location || location === 'Detecting location…') {
+      Alert.alert('Location required', 'Please detect or set a location before submitting.');
       return;
     }
 
     try {
       setSubmitting(true);
 
-      // Fetch location & address safely (prevent infinite hangs)
-      let lat, lng, address;
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      
-      if (status === 'granted') {
-        try {
-          const loc: any = await Promise.race([
-            Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced }),
-            Location.getLastKnownPositionAsync(),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('GPS timeout')), 6000))
-          ]);
-          
-          if (loc && loc.coords) {
-            lat = loc.coords.latitude;
-            lng = loc.coords.longitude;
-            try {
-              const geocode = await Location.reverseGeocodeAsync({ latitude: lat, longitude: lng });
-              if (geocode.length > 0) {
-                const p = geocode[0];
-                address = [p.name, p.street, p.city, p.region].filter(Boolean).join(', ');
-              }
-            } catch (e) {
-              console.warn('Reverse geocode failed:', e);
-            }
-          }
-        } catch (e) {
-          console.warn('[GPS Fetch]', e);
-        }
-      }
-
-      if (!lat) {
-        Alert.alert('Location Warning', 'We could not get your GPS location. Please ensure location services are enabled on your phone.');
-      }
-
-      const result = await ReportsAPI.create({
+      const payload = {
         title: title.trim() || undefined,
         description: description.trim() || undefined,
-        category_id: selectedCategory?.id,
+        category_id: selectedCategory?.category_id || selectedCategory?.id,
+        subcategory_id: selectedCategory?.subcategory_id || selectedCategory?.id,
         ward_id: selectedWard?.id,
-        lat,
-        lng,
-        address,
+        address: location,
+        imageBase64: image.base64,
+        mimeType: image.mimeType,
+        location,
+        category: selectedCategory?.name,
+        severity: aiResult?.severity || 'Medium',
+        authority: aiResult?.authority || selectedCategory?.name,
+        confidence: aiResult?.confidence ?? 0,
+        priority: (aiResult?.severity || 'Medium').toLowerCase(),
+        ai_classified: Boolean(aiResult),
+        ai_confidence: aiResult?.confidence ?? null,
+        authority_routed_to: aiResult?.authority || selectedCategory?.name || null,
+      } as Record<string, unknown>;
+
+      const response = await fetch(`${submitApiBaseUrl}/reports`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(session?.access_token ? { Authorization: `Bearer ${session.access_token}` } : {}),
+        },
+        body: JSON.stringify(payload),
       });
 
-      // Update XP visually right away!
+      if (!response.ok) {
+        const payloadError = await response.json().catch(() => ({}));
+        throw new Error(payloadError?.error || `HTTP ${response.status}`);
+      }
+
+      const result = await response.json();
       await refreshProfile();
 
-      Alert.alert('Report submitted', `+${result.xp_awarded} XP awarded\n${address ? 'Location attached.' : 'No location attached.'}`);
+      Alert.alert('Report Submitted! ✅', `+${result.xp_awarded ?? 0} XP awarded`);
       setTitle('');
       setDescription('');
-      setImageUri(null);
+      setImage(null);
+      setAiResult(null);
+      setShowAiCard(false);
+      fadeAnim.setValue(0);
+      router.back();
     } catch (err) {
       Alert.alert('Submit failed', err instanceof Error ? err.message : 'Could not submit report');
     } finally {
@@ -221,22 +352,34 @@ export default function ReportScreen() {
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); loadMetadata(); }} />}
       >
         {/* Upload Zone */}
-        {imageUri ? (
+        {image?.uri ? (
           <>
             <View style={styles.uploadZoneOuter}>
               <ImageBackground 
-                source={{ uri: imageUri }} 
+                source={{ uri: image.uri }} 
                 style={styles.uploadZoneFilled}
                 imageStyle={{ borderRadius: 14 }}
               >
                 <View style={styles.uploadOverlay} />
                 
-                <TouchableOpacity style={styles.dismissBtn} onPress={() => setImageUri(null)}>
+                {classifying && (
+                  <View style={styles.classifyingOverlay}>
+                    <ActivityIndicator size="small" color="#fff" />
+                    <Text style={styles.classifyingText}>Analysing…</Text>
+                  </View>
+                )}
+                
+                <TouchableOpacity style={styles.dismissBtn} onPress={() => {
+                  setImage(null);
+                  setAiResult(null);
+                  setShowAiCard(false);
+                  fadeAnim.setValue(0);
+                }}>
                   <X size={16} color="#000" />
                 </TouchableOpacity>
 
                 <View style={styles.photoAddedPill}>
-                  <Camera size={14} color="#fff" />
+                  <Image source={{ uri: image.uri }} style={styles.thumbnailMini} />
                   <Text style={styles.photoAddedText}>Photo added</Text>
                 </View>
               </ImageBackground>
@@ -302,11 +445,24 @@ export default function ReportScreen() {
             <Text style={styles.charCount}>{description.length} / 200</Text>
           </View>
 
+          <View style={styles.locationSummaryCard}>
+            <View style={styles.locationSummaryLeft}>
+              <MapPin size={16} color="#1a7a4a" />
+              <Text style={styles.locationSummaryText} numberOfLines={1}>{location}</Text>
+            </View>
+            <TouchableOpacity onPress={() => {
+              setCustomLocation(location === 'Detecting location…' ? '' : location);
+              setLocationModal(true);
+            }}>
+              <Text style={styles.locationChangeText}>Change</Text>
+            </TouchableOpacity>
+          </View>
+
           {/* Category Dropdown */}
           <Text style={styles.label}>Category</Text>
           <TouchableOpacity
             style={styles.selectorBtn}
-            disabled={!categories.length}
+            disabled={!categories.length || loading}
             onPress={() => setCategoryModal(true)}
           >
             <Text style={styles.selectorText}>{selectedCategory?.name ?? 'Select a category'}</Text>
@@ -318,8 +474,8 @@ export default function ReportScreen() {
             <Text style={styles.label}>Ward</Text>
             <TouchableOpacity 
               style={styles.detectBtn} 
-              onPress={detectLocation}
-              disabled={detectingLocation || !wards.length}
+              onPress={detectCurrentLocation}
+              disabled={detectingLocation}
             >
               <MapPin size={12} color="#1a7a4a" />
               <Text style={styles.detectBtnText}>
@@ -336,8 +492,56 @@ export default function ReportScreen() {
             <ChevronDown size={20} color="#6b7280" />
           </TouchableOpacity>
 
+          <Animated.View
+            style={[
+              styles.aiCard,
+              {
+                opacity: fadeAnim,
+                transform: [
+                  {
+                    translateY: fadeAnim.interpolate({
+                      inputRange: [0, 1],
+                      outputRange: [12, 0],
+                    }),
+                  },
+                ],
+                display: showAiCard ? 'flex' : 'none',
+              },
+            ]}
+          >
+            <View style={styles.aiCardHeader}>
+              <View>
+                <Text style={styles.aiCardTitle}>AI Classification</Text>
+                <Text style={styles.aiCardSubtitle}>Auto-detected from the photo</Text>
+              </View>
+              <View style={[styles.severityPill, aiResult?.severity === 'High' ? styles.severityHigh : aiResult?.severity === 'Medium' ? styles.severityMedium : styles.severityLow]}>
+                <Text style={[styles.severityPillText, aiResult?.severity === 'High' ? styles.severityHighText : aiResult?.severity === 'Medium' ? styles.severityMediumText : styles.severityLowText]}>
+                  {aiResult?.severity || 'Medium'}
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.aiSummaryRow}>
+              <Text style={styles.aiCategoryText}>{aiResult?.category || 'Category detected'}</Text>
+              <Text style={styles.aiConfidenceText}>{Math.round(aiResult?.confidence || 0)}% confidence</Text>
+            </View>
+
+            <Text style={styles.aiAuthorityText}>{aiResult?.authority || 'Authority'} • {aiResult?.description || 'Issue classified automatically.'}</Text>
+
+            <TouchableOpacity onPress={() => setCategoryModal(true)} style={styles.aiOverrideBtn}>
+              <Text style={styles.aiOverrideText}>Wrong category?</Text>
+            </TouchableOpacity>
+          </Animated.View>
+
           <TouchableOpacity style={[styles.submitBtn, submitting && styles.submitBtnDisabled]} onPress={submit} disabled={submitting}>
-            <Text style={styles.submitText}>{submitting ? 'Submitting...' : 'Submit Report'}</Text>
+            {submitting ? (
+              <View style={styles.submitInner}>
+                <ActivityIndicator size="small" color="#fff" />
+                <Text style={styles.submitText}>Submitting...</Text>
+              </View>
+            ) : (
+              <Text style={styles.submitText}>Submit Report</Text>
+            )}
           </TouchableOpacity>
         </View>
       </ScrollView>
@@ -345,7 +549,7 @@ export default function ReportScreen() {
       {/* Category Selection Modal */}
       <BottomModal visible={categoryModal} onClose={() => setCategoryModal(false)} title="Select Category">
         <FlatList
-          data={categories}
+          data={categories.length > 0 ? categories : MUNICIPAL_CATEGORY_OPTIONS}
           keyExtractor={c => c.id}
           renderItem={({ item }) => (
             <TouchableOpacity 
@@ -366,12 +570,48 @@ export default function ReportScreen() {
           renderItem={({ item }) => (
             <TouchableOpacity 
               style={[styles.listItem, selectedWard?.id === item.id && styles.listItemSelected]}
-              onPress={() => { setSelectedWard(item); setWardModal(false); }}
+              onPress={() => { setSelectedWard(item); setLocation(item.name); setWardModal(false); }}
             >
               <Text style={styles.listItemText}>{item.name}</Text>
             </TouchableOpacity>
           )}
         />
+      </BottomModal>
+
+      <BottomModal visible={locationModal} onClose={() => setLocationModal(false)} title="Set Location">
+        <View style={styles.locationModalContent}>
+          <TextInput
+            style={styles.locationInput}
+            value={customLocation}
+            onChangeText={setCustomLocation}
+            placeholder="Type a custom location"
+            placeholderTextColor="#9ca3af"
+          />
+          <TouchableOpacity style={styles.locationApplyBtn} onPress={() => {
+            setLocation(customLocation.trim() || location);
+            setLocationModal(false);
+          }}>
+            <Text style={styles.locationApplyText}>Use custom location</Text>
+          </TouchableOpacity>
+
+          <Text style={styles.locationSectionTitle}>Nearby wards</Text>
+          <FlatList
+            data={wards}
+            keyExtractor={(ward) => ward.id}
+            renderItem={({ item }) => (
+              <TouchableOpacity
+                style={[styles.listItem, selectedWard?.id === item.id && styles.listItemSelected]}
+                onPress={() => {
+                  setSelectedWard(item);
+                  setLocation(item.name);
+                  setLocationModal(false);
+                }}
+              >
+                <Text style={styles.listItemText}>{item.name}</Text>
+              </TouchableOpacity>
+            )}
+          />
+        </View>
       </BottomModal>
     </SafeAreaView>
   );
@@ -497,12 +737,32 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.6)',
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 12,
+    paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 20,
     gap: 6,
+    maxWidth: '70%',
+  },
+  thumbnailMini: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
   },
   photoAddedText: { color: '#fff', fontSize: 12, fontWeight: '600' },
+  classifyingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(0,0,0,0.45)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderRadius: 14,
+    gap: 8,
+  },
+  classifyingText: {
+    color: '#fff',
+    fontSize: 12,
+    fontWeight: '800',
+    letterSpacing: 0.4,
+  },
   
   // Actions below image
   imageActionsRow: {
@@ -551,8 +811,139 @@ const styles = StyleSheet.create({
     backgroundColor: '#fff',
   },
   selectorText: { color: '#111827', fontSize: 15 },
+  locationSummaryCard: {
+    marginTop: 12,
+    marginBottom: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: '#d1fae5',
+    backgroundColor: '#f0fdf4',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  locationSummaryLeft: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  locationSummaryText: {
+    flex: 1,
+    color: '#14532d',
+    fontSize: 13,
+    fontWeight: '700',
+  },
+  locationChangeText: {
+    color: '#1a7a4a',
+    fontSize: 12,
+    fontWeight: '800',
+  },
+  aiCard: {
+    marginTop: 16,
+    borderRadius: 14,
+    borderWidth: 1,
+    borderColor: '#d1fae5',
+    backgroundColor: '#fff',
+    padding: 14,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    elevation: 2,
+  },
+  aiCardHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 10,
+  },
+  aiCardTitle: {
+    fontSize: 14,
+    fontWeight: '800',
+    color: '#111827',
+  },
+  aiCardSubtitle: {
+    fontSize: 11,
+    color: '#6b7280',
+    marginTop: 2,
+  },
+  severityPill: {
+    borderRadius: 999,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+  },
+  severityHigh: {
+    backgroundColor: '#fee2e2',
+  },
+  severityMedium: {
+    backgroundColor: '#ffedd5',
+  },
+  severityLow: {
+    backgroundColor: '#dcfce7',
+  },
+  severityPillText: {
+    fontSize: 10,
+    fontWeight: '800',
+  },
+  severityHighText: {
+    color: '#b91c1c',
+  },
+  severityMediumText: {
+    color: '#c2410c',
+  },
+  severityLowText: {
+    color: '#166534',
+  },
+  aiSummaryRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 8,
+  },
+  aiCategoryText: {
+    fontSize: 15,
+    fontWeight: '800',
+    color: '#111827',
+  },
+  aiConfidenceText: {
+    fontSize: 11,
+    fontWeight: '800',
+    color: '#1a7a4a',
+    backgroundColor: '#ecfdf5',
+    borderRadius: 999,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  aiAuthorityText: {
+    fontSize: 12,
+    color: '#4b5563',
+    lineHeight: 18,
+    marginBottom: 10,
+  },
+  aiOverrideBtn: {
+    alignSelf: 'flex-start',
+    borderRadius: 999,
+    borderWidth: 1,
+    borderColor: '#1a7a4a',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    backgroundColor: '#f0fdf4',
+  },
+  aiOverrideText: {
+    color: '#1a7a4a',
+    fontSize: 11,
+    fontWeight: '800',
+  },
   submitBtn: { marginTop: 24, backgroundColor: '#1a7a4a', borderRadius: 10, paddingVertical: 14, alignItems: 'center' },
   submitBtnDisabled: { opacity: 0.7 },
+  submitInner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
   submitText: { color: '#fff', fontWeight: '700', fontSize: 16 },
   
   // Modal Styles
@@ -579,6 +970,39 @@ const styles = StyleSheet.create({
   },
   modalTitle: { fontSize: 18, fontWeight: '700', color: '#111827' },
   closeBtn: { padding: 4 },
+  locationModalContent: {
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 12,
+  },
+  locationInput: {
+    borderWidth: 1,
+    borderColor: '#d1d5db',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 12,
+    fontSize: 15,
+    color: '#111827',
+    marginBottom: 12,
+  },
+  locationApplyBtn: {
+    backgroundColor: '#1a7a4a',
+    borderRadius: 10,
+    paddingVertical: 12,
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  locationApplyText: {
+    color: '#fff',
+    fontSize: 14,
+    fontWeight: '800',
+  },
+  locationSectionTitle: {
+    fontSize: 13,
+    fontWeight: '800',
+    color: '#374151',
+    marginBottom: 8,
+  },
   listItem: {
     padding: 16,
     borderBottomWidth: 1,

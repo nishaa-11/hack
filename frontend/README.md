@@ -12,13 +12,20 @@ Copy `.env.example` to `.env` and set values:
 
 - `EXPO_PUBLIC_SUPABASE_URL`
 - `EXPO_PUBLIC_SUPABASE_ANON_KEY`
+- `EXPO_PUBLIC_API_BASE_URL`
 - `EXPO_PUBLIC_API_URL`
 
-`EXPO_PUBLIC_API_URL` should point to the backend API root:
+`EXPO_PUBLIC_API_BASE_URL` should point to the backend API root on your computer:
+
+- Physical device: `http://<YOUR_LOCAL_IP>:3001/api/v1`
+
+If you prefer the older variable name, `EXPO_PUBLIC_API_URL` is still supported.
+
+Examples:
 
 - Android emulator: `http://10.0.2.2:3001/api/v1`
 - iOS simulator/web: `http://localhost:3001/api/v1`
-- Physical device: `http://<YOUR_LOCAL_IP>:3001/api/v1`
+- Physical device: `http://192.168.x.x:3001/api/v1`
 
 ## 3) Start backend first
 

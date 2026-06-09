@@ -9,6 +9,39 @@ const genAI = new GoogleGenerativeAI(apiKey || 'uninitialized');
 const modelName = process.env.GEMINI_MODEL || 'gemini-2.5-flash';
 const model = genAI.getGenerativeModel({ model: modelName });
 
+const civicImageSystemPrompt = `You are an advanced civic infrastructure and municipal maintenance analysis agent. Your sole responsibility is to analyze user-submitted images and determine if a civic or municipal issue is present.
+
+CRITICAL INSTRUCTION: You must output your response strictly as a single, valid JSON object. Do not wrap the output in markdown formatting blocks (such as
+\`\`\`json ... \`\`\`), do not output any introductory or explanatory text, and do not append conversational greetings. Your response must begin with '{' and end with '}'.
+
+Analysis Rules:
+1. If the image accurately displays a municipal issue (e.g., a pothole, broken streetlamp, overflowing garbage, or burst water pipe), flag it as a valid civic issue and determine the best matching municipal department category.
+2. If the image is unrelated to public civic infrastructure (e.g., a picture of food, a dessert plate, an indoor selfie, animals, or general household objects), you must still return valid JSON, but set "is_valid_civic_issue" to false and set the category to "Invalid".
+
+JSON Output Schema:
+{
+  "is_valid_civic_issue": true/false,
+  "category": "Pothole" | "Streetlight Fault" | "Garbage Dumping" | "Sewage Overflow" | "Water Leakage" | "Invalid",
+  "confidence_score": 0.0 to 1.0,
+  "analysis_summary": "A clear, concise description of what is visible in the photo and why it was classified this way."
+}`;
+
+function cleanJsonText(text) {
+  let cleanedText = text.trim();
+
+  if (cleanedText.startsWith('```json')) {
+    cleanedText = cleanedText.substring(7);
+  } else if (cleanedText.startsWith('```')) {
+    cleanedText = cleanedText.substring(3);
+  }
+
+  if (cleanedText.endsWith('```')) {
+    cleanedText = cleanedText.substring(0, cleanedText.length - 3);
+  }
+
+  return cleanedText.trim();
+}
+
 /**
  * Classifies an incoming issue title and description into the most applicable domain category
  * @param {string} title 
@@ -67,6 +100,63 @@ Return ONLY the raw JSON format string, nothing else.`;
   }
 }
 
+/**
+ * Classifies a civic issue image into the requested JSON schema.
+ * @param {string} base64
+ * @param {string} mimeType
+ * @returns {Promise<{is_valid_civic_issue: boolean, category: string, confidence_score: number, analysis_summary: string} | {error: string}>}
+ */
+async function classifyCivicImage(base64, mimeType) {
+  if (!apiKey) {
+    return { error: 'GEMINI_API_KEY is not set in environment.' };
+  }
+
+  try {
+    const imageModel = genAI.getGenerativeModel({
+      model: modelName,
+      systemInstruction: civicImageSystemPrompt,
+    });
+
+    const result = await imageModel.generateContent({
+      contents: [
+        {
+          role: 'user',
+          parts: [
+            {
+              inlineData: {
+                mimeType: mimeType || 'image/jpeg',
+                data: base64,
+              },
+            },
+            {
+              text: 'Analyze this image and return only the JSON object described in the system instructions.',
+            },
+          ],
+        },
+      ],
+      generationConfig: {
+        responseMimeType: 'application/json',
+        temperature: 0.2,
+        topP: 0.95,
+      },
+    });
+
+    const text = cleanJsonText(result.response.text());
+    const parsed = JSON.parse(text);
+
+    return {
+      is_valid_civic_issue: Boolean(parsed.is_valid_civic_issue),
+      category: parsed.category || 'Invalid',
+      confidence_score: typeof parsed.confidence_score === 'number' ? parsed.confidence_score : 0,
+      analysis_summary: parsed.analysis_summary || 'No analysis summary returned.',
+    };
+  } catch (err) {
+    console.error('Gemini Civic Image Classification Error:', err);
+    return { error: 'Gemini image classification failed' };
+  }
+}
+
 module.exports = {
-  classifyIssue
+  classifyIssue,
+  classifyCivicImage
 };

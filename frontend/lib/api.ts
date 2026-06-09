@@ -1,15 +1,20 @@
 /**
  * CivicPulse API Client
  * Thin wrapper around fetch that:
- *  - Prefixes all paths with EXPO_PUBLIC_API_URL
- *  - Auto-injects the Supabase session Bearer token
- *  - Throws typed errors on non-2xx responses
+ * - Prefixes all paths with EXPO_PUBLIC_API_URL
+ * - Auto-injects the Supabase session Bearer token
+ * - Throws typed errors on non-2xx responses
  */
 import { supabase } from './supabase';
 import { Platform } from 'react-native';
 
-const BASE_URL = process.env.EXPO_PUBLIC_API_URL 
-  ?? (Platform.OS === 'android' ? 'http://10.0.2.2:3001/api/v1' : 'http://localhost:3001/api/v1');
+const localNetworkIp = process.env.EXPO_PUBLIC_LOCAL_IP?.trim();
+const configuredApiUrl = process.env.EXPO_PUBLIC_API_URL?.trim();
+
+const BASE_URL = configuredApiUrl
+  ?? (localNetworkIp ? `http://${localNetworkIp}:3001/api/v1` : Platform.OS === 'android'
+    ? 'http://10.0.2.2:3001/api/v1'
+    : 'http://localhost:3001/api/v1');
 
 // Note: If you're testing on a physical device, 'localhost' will NOT work.
 // The device needs your computer's actual local WiFi IP address.
@@ -97,6 +102,10 @@ export const ReportsAPI = {
   create: (body: CreateReportPayload) => api.post<{ report: Report; xp_awarded: number }>('/reports', body as unknown as Record<string, unknown>),
   updateStatus: (id: string, status: string, note?: string) =>
     api.patch<{ report: Report }>(`/reports/${id}/status`, { status, note }),
+  
+  // FIXED: Added the missing image classification handler route
+  classifyImage: (body: { imageBase64: string; mimeType?: string }) => 
+    api.post<{ classification: any }>('/reports/classify-image', body),
 };
 
 // CHALLENGES

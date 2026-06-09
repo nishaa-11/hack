@@ -1,9 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { supabase } from '@/lib/supabase';
-import { Calendar, Download, AlertOctagon, CheckCircle2, Clock, Users, Eye, LayoutDashboard } from 'lucide-react';
-import { formatDistanceToNow } from 'date-fns';
+import { AlertOctagon, CheckCircle2, Clock, Eye, LayoutDashboard, Plus, Users, X } from 'lucide-react';
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip, Legend } from 'recharts';
 
 const COLORS = ['#10b981', '#3b82f6', '#ef4444', '#f59e0b', '#8b5cf6', '#ec4899'];
@@ -15,98 +13,90 @@ export default function SinglePageDashboard() {
     avgResponseTime: 2.4,
     citizenReports: 0,
   });
-  
+
   const [recentReports, setRecentReports] = useState<any[]>([]);
   const [chartData, setChartData] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedPriority, setSelectedPriority] = useState<string>('all');
+  const [selectedComplaint, setSelectedComplaint] = useState<any | null>(null);
+  const [isFormOpen, setIsFormOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [formData, setFormData] = useState({ description: '', location: '', priority: 'High' });
+
+  const fetchDashboardData = async () => {
+    try {
+      setLoading(true);
+      const response = await fetch('http://localhost:5000/api/complaints');
+      if (!response.ok) {
+        throw new Error('Unable to fetch dashboard data from the backend');
+      }
+
+      const data = await response.json();
+      const queue = (data.queue || []).filter((item: any) => {
+        return selectedPriority === 'all' ? true : item.priority.toLowerCase() === selectedPriority;
+      });
+
+      setStats({
+        openIssues: data.metrics?.openIssues || 0,
+        resolvedToday: data.metrics?.resolvedToday || 0,
+        avgResponseTime: 2.4,
+        citizenReports: data.metrics?.totalReports || 0,
+      });
+      setRecentReports(queue);
+
+      const locationCounts: Record<string, number> = {};
+      queue.forEach((item: any) => {
+        const key = item.location || 'Unknown';
+        locationCounts[key] = (locationCounts[key] || 0) + 1;
+      });
+
+      setChartData(Object.entries(locationCounts).map(([name, value]) => ({ name, value })));
+    } catch (error) {
+      console.error('Error fetching dashboard data:', error);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   useEffect(() => {
-    async function fetchDashboardData() {
-      try {
-        console.log('Fetching dashboard data with Service Role Key...');
-        
-        // 1. Fetch total count (permisssive)
-        const { count: total, error: countErr } = await supabase
-          .from('reports')
-          .select('id', { count: 'exact', head: true });
-
-        if (countErr) {
-          console.error('SUPABASE COUNT ERROR:', countErr);
-        }
-        console.log('Total reports in DB (fetched from frontend):', total);
-
-        const { count: resCount } = await supabase
-          .from('reports')
-          .select('id', { count: 'exact', head: true })
-          .eq('status', 'resolved');
-
-        setStats({
-          openIssues: (total || 0) - (resCount || 0),
-          resolvedToday: resCount || 0,
-          avgResponseTime: 2.4,
-          citizenReports: total || 0,
-        });
-
-        // 2. Fetch reports for table and chart (using professional join)
-        let query = supabase
-          .from('reports')
-          .select(`
-            id, title, status, address, category_id, 
-            priority, created_at, 
-            issue_categories ( name )
-          `)
-          .order('created_at', { ascending: false });
-
-        if (selectedPriority !== 'all') {
-          query = query.eq('priority', selectedPriority.toLowerCase());
-        }
-
-        const { data: reports, error: reportsErr } = await query;
-
-        if (reportsErr) {
-          console.error('SUPABASE REPORTS ERROR:', reportsErr);
-        }
-        
-        if (reports) {
-          setRecentReports(reports.slice(0, 8));
-
-          // Group by category name for chart
-          const categoryCounts: Record<string, number> = {};
-          reports.forEach((r: any) => {
-            const cat = Array.isArray(r.issue_categories) ? r.issue_categories[0] : r.issue_categories;
-            const catName = cat?.name || 'Uncategorized';
-            categoryCounts[catName] = (categoryCounts[catName] || 0) + 1;
-          });
-
-          const formattedChart = Object.entries(categoryCounts).map(([name, value]) => ({
-            name,
-            value
-          }));
-          setChartData(formattedChart);
-        }
-
-      } catch (err) {
-        console.error('General error fetching dashboard:', err);
-      } finally {
-        setLoading(false);
-      }
-    }
-
     fetchDashboardData();
   }, [selectedPriority]);
 
-  const getStatusColor = (status: string) => {
-    switch (status) {
-      case 'resolved': return 'text-green-600 bg-green-50 px-2 py-1 rounded border border-green-200';
-      case 'in_progress': return 'text-orange-600 bg-orange-50 px-2 py-1 rounded border border-orange-200';
-      default: return 'text-red-500 bg-red-50 px-2 py-1 rounded border border-red-200';
+  const handleSubmitComplaint = async (event: React.FormEvent) => {
+    event.preventDefault();
+    setSubmitting(true);
+
+    try {
+      const response = await fetch('http://localhost:5000/api/complaints', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(formData),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to create complaint');
+      }
+
+      setFormData({ description: '', location: '', priority: 'High' });
+      setIsFormOpen(false);
+      await fetchDashboardData();
+    } catch (error) {
+      console.error('Error creating complaint:', error);
+    } finally {
+      setSubmitting(false);
     }
+  };
+
+  const getStatusColor = (status: string) => {
+    if (status?.toLowerCase() === 'resolved') {
+      return 'text-green-600 bg-green-50 px-2 py-1 rounded border border-green-200';
+    }
+    return 'text-red-500 bg-red-50 px-2 py-1 rounded border border-red-200';
   };
 
   const getSeverityBadge = (severity: string) => {
     const s = severity?.toLowerCase();
-    if (s === 'high' || s === 'critical') return <span className="text-xs font-semibold text-red-600 bg-red-100 px-2 py-1 rounded-full uppercase">Critical</span>;
+    if (s === 'high') return <span className="text-xs font-semibold text-red-600 bg-red-100 px-2 py-1 rounded-full uppercase">High</span>;
     if (s === 'medium') return <span className="text-xs font-semibold text-orange-600 bg-orange-100 px-2 py-1 rounded-full uppercase">Medium</span>;
     return <span className="text-xs font-semibold text-green-600 bg-green-100 px-2 py-1 rounded-full uppercase">Low</span>;
   };
@@ -202,7 +192,7 @@ export default function SinglePageDashboard() {
                 <div className="w-full h-full flex items-center justify-center text-slate-400">Loading chart...</div>
               ) : chartData.length > 0 ? (
                 <ResponsiveContainer width="100%" height="100%">
-                  <PieChart suppressHydrationWarning>
+                  <PieChart>
                     <Pie
                       data={chartData}
                       cx="50%"
@@ -239,6 +229,14 @@ export default function SinglePageDashboard() {
                 <p className="text-sm text-slate-500 font-medium mt-1">Live feed of active issues from Bengaluru</p>
               </div>
               <div className="flex gap-2 items-center">
+                <button
+                  type="button"
+                  onClick={() => setIsFormOpen(true)}
+                  className="inline-flex items-center gap-2 rounded-xl bg-emerald-700 px-4 py-2 text-sm font-semibold text-white shadow-sm hover:bg-emerald-800"
+                >
+                  <Plus className="w-4 h-4" />
+                  Lodge Complaint
+                </button>
                 <div className="relative">
                   <select 
                     value={selectedPriority} 
@@ -272,24 +270,25 @@ export default function SinglePageDashboard() {
                 <tbody className="text-sm divide-y divide-slate-50">
                   {recentReports.map((report) => (
                     <tr key={report.id} className="hover:bg-slate-50/50 transition-colors">
-                      <td className="py-5 text-slate-500 font-serif">#{report.id.substring(0, 6)}</td>
+                      <td className="py-5 text-slate-500 font-serif">#{String(report.id).slice(0, 6)}</td>
                       <td className="py-5">
-                        <div className="font-extrabold text-slate-950 truncate max-w-[200px]">{report.title || "No Title"}</div>
-                        <div className="text-xs text-slate-500 mt-0.5">
-                          {Array.isArray(report.issue_categories) 
-                            ? report.issue_categories[0]?.name 
-                            : report.issue_categories?.name || 'Inquiry'}
-                        </div>
+                        <div className="font-extrabold text-slate-950 truncate max-w-[240px]">{report.description || 'No description provided'}</div>
+                        <div className="text-xs text-slate-500 mt-0.5">{new Date(report.created_at).toLocaleString()}</div>
                       </td>
-                      <td className="py-5 text-slate-600 max-w-[150px] truncate">{report.address?.split(',')[0] || "City Center"}</td>
+                      <td className="py-5 text-slate-600 max-w-[150px] truncate">{report.location || 'Bengaluru'}</td>
                       <td className="py-5">{getSeverityBadge(report.priority)}</td>
                       <td className="py-5">
                         <span className={`text-[10px] font-black uppercase tracking-tighter ${getStatusColor(report.status)}`}>
-                          {report.status?.replace('_', ' ') || 'pending'}
+                          {report.status || 'Open'}
                         </span>
                       </td>
                       <td className="py-5 text-right">
-                        <button className="p-2.5 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-2xl transition-all">
+                        <button
+                          type="button"
+                          onClick={() => setSelectedComplaint(report)}
+                          className="p-2.5 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-2xl transition-all"
+                          aria-label={`View complaint ${report.id}`}
+                        >
                           <Eye className="w-5 h-5" />
                         </button>
                       </td>
@@ -310,6 +309,129 @@ export default function SinglePageDashboard() {
 
         </div>
       </div>
+
+      {selectedComplaint && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="w-full max-w-lg rounded-3xl bg-white p-6 shadow-2xl">
+            <div className="mb-5 flex items-center justify-between">
+              <div>
+                <p className="text-xs uppercase tracking-[0.3em] text-emerald-600">Complaint Details</p>
+                <h3 className="text-xl font-black text-slate-900">#{String(selectedComplaint.id).slice(0, 6)}</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setSelectedComplaint(null)}
+                className="rounded-full p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4 text-sm text-slate-700">
+              <div className="rounded-2xl bg-slate-50 p-4">
+                <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Description</p>
+                <p className="mt-1 text-base text-slate-900">{selectedComplaint.description || 'No description provided.'}</p>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="rounded-2xl bg-slate-50 p-4">
+                  <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Location</p>
+                  <p className="mt-1 font-semibold text-slate-900">{selectedComplaint.location || 'Bengaluru'}</p>
+                </div>
+                <div className="rounded-2xl bg-slate-50 p-4">
+                  <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Priority</p>
+                  <p className="mt-1 font-semibold text-slate-900">{selectedComplaint.priority || 'Medium'}</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div className="rounded-2xl bg-slate-50 p-4">
+                  <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Status</p>
+                  <p className="mt-1 font-semibold text-slate-900">{selectedComplaint.status || 'Open'}</p>
+                </div>
+                <div className="rounded-2xl bg-slate-50 p-4">
+                  <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Created</p>
+                  <p className="mt-1 font-semibold text-slate-900">{new Date(selectedComplaint.created_at).toLocaleString()}</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {isFormOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4">
+          <div className="w-full max-w-md rounded-3xl bg-white p-6 shadow-2xl">
+            <div className="mb-5 flex items-center justify-between">
+              <div>
+                <h3 className="text-xl font-black text-slate-900">Lodging a Complaint</h3>
+                <p className="text-sm text-slate-500">Submit a new issue and it will appear instantly in the queue.</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsFormOpen(false)}
+                className="rounded-full p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form className="space-y-4" onSubmit={handleSubmitComplaint}>
+              <label className="block text-sm font-semibold text-slate-700">
+                Description
+                <textarea
+                  required
+                  rows={4}
+                  value={formData.description}
+                  onChange={(event) => setFormData({ ...formData, description: event.target.value })}
+                  className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-900 outline-none ring-0 placeholder:text-slate-400"
+                  placeholder="Describe the issue in a few words"
+                />
+              </label>
+
+              <label className="block text-sm font-semibold text-slate-700">
+                Location
+                <input
+                  required
+                  type="text"
+                  value={formData.location}
+                  onChange={(event) => setFormData({ ...formData, location: event.target.value })}
+                  className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-900 outline-none ring-0 placeholder:text-slate-400"
+                  placeholder="e.g. Whitefield"
+                />
+              </label>
+
+              <label className="block text-sm font-semibold text-slate-700">
+                Priority
+                <select
+                  value={formData.priority}
+                  onChange={(event) => setFormData({ ...formData, priority: event.target.value })}
+                  className="mt-1 w-full rounded-2xl border border-slate-200 bg-slate-50 p-3 text-sm text-slate-900 outline-none ring-0"
+                >
+                  <option value="High">High</option>
+                  <option value="Medium">Medium</option>
+                  <option value="Low">Low</option>
+                </select>
+              </label>
+
+              <div className="flex justify-end gap-3 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setIsFormOpen(false)}
+                  className="rounded-xl border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-100"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={submitting}
+                  className="rounded-xl bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  {submitting ? 'Submitting...' : 'Submit Complaint'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

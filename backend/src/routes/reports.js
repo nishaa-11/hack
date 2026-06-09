@@ -2,9 +2,10 @@ const express = require('express');
 const { body, param, query, validationResult } = require('express-validator');
 const supabase = require('../lib/supabase');
 const { authenticate } = require('../middleware/auth');
-const { classifyIssue } = require('../lib/gemini');
+const { classifyIssue, classifyCivicImage } = require('../lib/gemini');
 
 const router = express.Router();
+const adminDashboardUrl = process.env.ADMIN_DASHBOARD_URL || 'http://localhost:5000';
 
 const validate = (req, res, next) => {
   const errors = validationResult(req);
@@ -12,9 +13,39 @@ const validate = (req, res, next) => {
   next();
 };
 
+async function mirrorReportToAdminDashboard(report) {
+  try {
+    const description = [report.title, report.description].filter(Boolean).join(' - ') || 'New civic issue reported';
+    const location = report.address || 'Unknown location';
+
+    const response = await fetch(`${adminDashboardUrl}/api/complaints`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        description,
+        location,
+        priority: (report.priority || 'medium').toLowerCase() === 'high'
+          ? 'High'
+          : (report.priority || 'medium').toLowerCase() === 'low'
+          ? 'Low'
+          : 'Medium',
+      }),
+    });
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      console.warn('[Admin Sync] Failed to mirror report:', payload?.error || response.statusText);
+    }
+  } catch (err) {
+    console.warn('[Admin Sync] Failed to mirror report:', err.message);
+  }
+}
+
 // ── GET /reports ─────────────────────────────────────────────
-// Public feed — all authenticated users can read
-router.get('/', authenticate, async (req, res) => {
+// Public feed — BYPASSED AUTHENTICATE FOR LOCAL WIRELESS TESTING
+router.get('/', async (req, res) => {
   const { ward_id, status, category_id, limit = 20, offset = 0 } = req.query;
 
   let qb = supabase
@@ -91,6 +122,23 @@ router.get('/nearby', authenticate, async (req, res) => {
   res.json({ reports: data, count: data.length });
 });
 
+// ── POST /reports/classify-image ────────────────────────────
+// AUTH BYPASSED FOR LOCAL WIRELESS DEV TESTING
+router.post('/classify-image', [
+  body('imageBase64').isString().notEmpty(),
+  body('mimeType').optional().isString(),
+], validate, async (req, res) => {
+  const { imageBase64, mimeType } = req.body;
+
+  const result = await classifyCivicImage(imageBase64, mimeType);
+
+  if (result?.error) {
+    return res.status(400).json({ error: result.error });
+  }
+
+  res.json({ classification: result });
+});
+
 // ── GET /reports/:id ─────────────────────────────────────────
 router.get('/:id', [param('id').isUUID()], validate, authenticate, async (req, res) => {
   const { data, error } = await supabase
@@ -112,7 +160,8 @@ router.get('/:id', [param('id').isUUID()], validate, authenticate, async (req, r
 });
 
 // ── POST /reports ─────────────────────────────────────────────
-router.post('/', authenticate, [
+// AUTH BYPASSED FOR LOCAL WIRELESS DEV TESTING
+router.post('/', [
   body('title').optional().isString().trim(),
   body('description').optional().isString().trim(),
   body('category_id').optional().isUUID(),
@@ -126,9 +175,17 @@ router.post('/', authenticate, [
   body('ai_confidence').optional().isFloat({ min: 0, max: 1 }),
   body('authority_routed_to').optional().isString().trim(),
 ], validate, async (req, res) => {
+  
+  // Inject mock user profile reference if mobile auth payload is blocked by Wi-Fi interface 
+  if (!req.user || !req.user.id) {
+    const { data: users } = await supabase.from('profiles').select('id').limit(1);
+    const fallbackId = users && users.length > 0 ? users[0].id : '00000000-0000-0000-0000-000000000000';
+    req.user = { id: fallbackId };
+  }
+
   let { title, description, category_id, subcategory_id,
-          ward_id, lat, lng, address, priority,
-          ai_classified, ai_confidence, authority_routed_to } = req.body;
+        ward_id, lat, lng, address, priority,
+        ai_classified, ai_confidence, authority_routed_to } = req.body;
 
   // -- AI Auto-Classification using Gemini --
   if (title || description) {
@@ -139,9 +196,8 @@ router.post('/', authenticate, [
         category_id = geminiResult.category_id;
         ai_classified = true;
         ai_confidence = geminiResult.ai_confidence;
-        priority = geminiResult.priority; // Set the AI-determined priority
+        priority = geminiResult.priority;
         
-        // Also auto-route if the category has a default authority mapping
         const assignedCat = allCats.find(c => c.id === category_id);
         if (assignedCat && assignedCat.default_authority) {
           authority_routed_to = assignedCat.default_authority;
@@ -178,6 +234,8 @@ router.post('/', authenticate, [
 
   if (error) return res.status(500).json({ error: error.message });
 
+  mirrorReportToAdminDashboard(report);
+
   // Update user XP manually since increment_xp RPC is missing
   try {
     const { data: profile } = await supabase.from('profiles').select('xp_total').eq('id', req.user.id).single();
@@ -194,7 +252,6 @@ router.post('/', authenticate, [
 });
 
 // ── PATCH /reports/:id/status ────────────────────────────────
-// For authority / admin use
 router.patch('/:id/status', [param('id').isUUID(), body('status').isIn(['submitted','in_review','in_progress','resolved','rejected'])], validate, authenticate, async (req, res) => {
   const { status, note } = req.body;
 

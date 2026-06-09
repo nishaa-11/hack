@@ -32,9 +32,9 @@ app.use(cors({
   credentials: true,
 }));
 
-// ── Body Parsing ──────────────────────────────────────────────
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+// ── Body Parsing (FIXED: Increased limits to 50mb for mobile camera base64 payloads) ──
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ limit: '50mb', extended: true }));
 
 // ── Health Check ──────────────────────────────────────────────
 app.get('/health', (_req, res) => {
@@ -68,8 +68,10 @@ app.use((err, _req, res, _next) => {
 
 // ── Start Server ──────────────────────────────────────────────
 const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => {
-  console.log(`\n🌿 CivicPulse API running on http://localhost:${PORT}`);
+const HOST = '0.0.0.0';
+
+app.listen(PORT, HOST, () => {
+  console.log(`\n🌿 CivicPulse API running on http://0.0.0.0:${PORT}`);
   console.log(`   Environment : ${process.env.NODE_ENV || 'development'}`);
   console.log(`   Supabase URL: ${process.env.SUPABASE_URL || '(not set)'}\n`);
 });

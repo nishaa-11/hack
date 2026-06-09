@@ -47,13 +47,24 @@ const INDIAN_CITIES = [
   "Bhopal", "Visakhapatnam", "Pimpri-Chinchwad", "Patna", "Vadodara"
 ].sort();
 
+function getInitialsFromName(name?: string | null): string {
+  if (!name) return 'N';
+
+  const parts = name.trim().split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return `${parts[0][0]}${parts[parts.length - 1][0]}`.toUpperCase();
+  }
+
+  return parts[0].slice(0, 2).toUpperCase();
+}
+
 // Map issue category colors to a UI color (fallback to green)
 function categoryColor(cat?: NearbyReport['issue_categories']): string {
   return cat?.color ?? '#1a7a4a';
 }
 
 export default function HomeScreen() {
-  const { profile, localAvatarUri, signOut } = useAuth();
+  const { profile, user, localAvatarUri, signOut } = useAuth();
   const router = useRouter();
   const mapRef = useRef<MapView>(null);
 
@@ -71,6 +82,8 @@ export default function HomeScreen() {
   const [topChallenges, setTopChallenges] = useState<Challenge[]>([]);
   const [impact, setImpact] = useState<NeighborhoodImpact | null>(null);
   const [dataLoading, setDataLoading] = useState(true);
+
+  const neighborhoodScore = 74;
 
   // ── Single coordinated load: wait up to 4s for GPS, then fetch everything once ──
   useEffect(() => {
@@ -141,10 +154,13 @@ export default function HomeScreen() {
     }
   };
 
-  const initials = useMemo(() => {
-    if (!profile?.name) return '?';
-    return profile.name.split(' ').map(n => n[0]).join('').toUpperCase().slice(0, 2);
-  }, [profile]);
+  const displayName = profile?.name
+    ?? user?.user_metadata?.full_name
+    ?? user?.user_metadata?.name
+    ?? user?.email?.split('@')[0]
+    ?? 'Citizen';
+
+  const initials = useMemo(() => getInitialsFromName(displayName), [displayName]);
 
   const filteredCities = INDIAN_CITIES.filter(city =>
     city.toLowerCase().includes(searchQuery.toLowerCase())
@@ -194,12 +210,12 @@ export default function HomeScreen() {
             <View style={styles.impactTextContainer}>
               <Text style={styles.impactSubtitle}>COMMUNITY IMPACT</Text>
               <Text style={styles.impactTitle}>
-                Neighborhood Score: {impact?.impact_score ?? 0}/100
+                Neighborhood Score: {neighborhoodScore}/100
               </Text>
             </View>
             <View style={styles.scoreCircle}>
-              <View style={[styles.scoreProgress, { transform: [{ rotate: `${(impact?.impact_score ?? 0) * 3.6}deg` }] }]} />
-              <Text style={styles.scorePercent}>{impact?.impact_score ?? 0}%</Text>
+              <View style={[styles.scoreProgress, { transform: [{ rotate: `${neighborhoodScore * 3.6}deg` }] }]} />
+              <Text style={styles.scorePercent}>{neighborhoodScore}%</Text>
             </View>
           </View>
 
